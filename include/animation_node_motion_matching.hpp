@@ -24,11 +24,11 @@ class AnimationNodeMotionMatching : public AnimationRootNode {
 private:
 	NodePath _controller_path;
 	ObjectID _controller_id;
-	MotionMatchingController *_controller = nullptr;
+	mutable MotionMatchingController *_controller = nullptr;
 	bool _use_custom_timeline = true;
-	double _last_time = 0.0;
+	mutable double _last_time = 0.0;
 
-	MotionMatchingController *_resolve_controller();
+	MotionMatchingController *_resolve_controller() const;
 
 protected:
 	static void _bind_methods();
@@ -48,7 +48,7 @@ public:
 	AnimationNode::NodeTimeInfo _process_animation_node(double p_time, bool p_seek,
 			bool p_is_external_seeking, bool p_test_only);
 
-	double _process(double p_time, bool p_seek, bool p_is_external_seeking, bool p_test_only) override;
+	double _process(double p_time, bool p_seek, bool p_is_external_seeking, bool p_test_only) const override;
 };
 
 } // namespace godot
