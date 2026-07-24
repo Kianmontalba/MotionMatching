@@ -1,0 +1,64 @@
+#ifndef MM_DEBUG_HPP
+#define MM_DEBUG_HPP
+
+#include "mm_types.hpp"
+#include "motion_matching.hpp"
+
+#include <godot_cpp/classes/immediate_mesh.hpp>
+#include <godot_cpp/classes/mesh_instance3d.hpp>
+#include <godot_cpp/classes/standard_material3d.hpp>
+
+namespace godot {
+
+// ---------------------------------------------------------------------------
+// MMDebugDraw
+//
+// The trajectory debug draw, in the style every AAA motion matching tool ships
+// with: past line behind, predicted line ahead, a marker per sample, and the
+// matched clip's own trajectory drawn on top so a mismatch is visible instead
+// of merely suspected.
+// ---------------------------------------------------------------------------
+class MMDebugDraw : public MeshInstance3D {
+	GDCLASS(MMDebugDraw, MeshInstance3D);
+
+private:
+	NodePath _controller_path;
+	MotionMatchingController *_controller = nullptr;
+	Ref<ImmediateMesh> _mesh;
+	Ref<StandardMaterial3D> _material;
+
+	bool _draw_trajectory = true;
+	bool _draw_matched_trajectory = true;
+	bool _draw_facing = true;
+	float _marker_size = 0.06f;
+	Color _history_color = Color(0.35f, 0.55f, 1.0f);
+	Color _future_color = Color(0.2f, 1.0f, 0.5f);
+	Color _matched_color = Color(1.0f, 0.65f, 0.15f);
+
+	void _draw_line(const Vector3 &p_from, const Vector3 &p_to, const Color &p_color);
+	void _draw_marker(const Vector3 &p_position, float p_size, const Color &p_color);
+
+protected:
+	static void _bind_methods();
+
+public:
+	MMDebugDraw();
+
+	void set_controller_path(const NodePath &p_path);
+	NodePath get_controller_path() const { return _controller_path; }
+
+	MM_ACCESSORS(bool, draw_trajectory)
+	MM_ACCESSORS(bool, draw_matched_trajectory)
+	MM_ACCESSORS(bool, draw_facing)
+	MM_ACCESSORS(float, marker_size)
+	MM_ACCESSORS(Color, history_color)
+	MM_ACCESSORS(Color, future_color)
+	MM_ACCESSORS(Color, matched_color)
+
+	void _ready() override;
+	void _process(double p_delta) override;
+};
+
+} // namespace godot
+
+#endif // MM_DEBUG_HPP
