@@ -1,0 +1,142 @@
+name: Build Motion Matching GDExtension
+
+# Runs the real compile on GitHub's own servers, since it cannot be
+# performed inside the development sandbox that produced this addon's
+# source (confirmed: background build processes do not survive across
+# that sandbox's execution boundaries). Push this repo to GitHub and
+# this workflow builds every platform automatically; download the
+# resulting .so/.dll/.framework files from the "Artifacts" section of
+# the completed workflow run.
+
+on:
+  push:
+  workflow_dispatch: {}
+
+env:
+  GODOT_CPP_BRANCH: "4.3"  # Change to match the exact Godot version you target.
+
+jobs:
+  android:
+    name: Android (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone godot-cpp
+        run: git clone --branch ${{ env.GODOT_CPP_BRANCH }} --depth 1 https://github.com/godotengine/godot-cpp godot-cpp
+
+      - name: Set up Python (for SCons)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install SCons
+        run: pip install scons
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r23c  # Corresponds to NDK 23.2.8568313, matching godot-cpp's default.
+
+      - name: Build godot-cpp (Android, debug)
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd godot-cpp
+          scons platform=android target=template_debug arch=arm64 -j$(nproc)
+
+      - name: Build godot-cpp (Android, release)
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd godot-cpp
+          scons platform=android target=template_release arch=arm64 -j$(nproc)
+
+      - name: Build addon (Android, debug)
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: scons platform=android target=template_debug arch=arm64 -j$(nproc)
+
+      - name: Build addon (Android, release)
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: scons platform=android target=template_release arch=arm64 -j$(nproc)
+
+      - name: List output
+        run: find demo/addons/motion_matching/bin -type f
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: motion_matching-android-arm64
+          path: demo/addons/motion_matching/bin/libmotionmatching.android.*.arm64.so
+          if-no-files-found: error
+
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git clone --branch ${{ env.GODOT_CPP_BRANCH }} --depth 1 https://github.com/godotengine/godot-cpp godot-cpp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install scons
+      - run: sudo apt-get update && sudo apt-get install -y build-essential
+      - run: cd godot-cpp && scons platform=linux target=template_debug -j$(nproc)
+      - run: cd godot-cpp && scons platform=linux target=template_release -j$(nproc)
+      - run: scons platform=linux target=template_debug -j$(nproc)
+      - run: scons platform=linux target=template_release -j$(nproc)
+      - run: find demo/addons/motion_matching/bin -type f
+      - uses: actions/upload-artifact@v4
+        with:
+          name: motion_matching-linux-x86_64
+          path: demo/addons/motion_matching/bin/libmotionmatching.linux.*.x86_64.so
+          if-no-files-found: error
+
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git clone --branch ${{ env.GODOT_CPP_BRANCH }} --depth 1 https://github.com/godotengine/godot-cpp godot-cpp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install scons
+      - name: Build godot-cpp
+        run: |
+          cd godot-cpp
+          scons platform=windows target=template_debug -j2
+          scons platform=windows target=template_release -j2
+      - name: Build addon
+        run: |
+          scons platform=windows target=template_debug -j2
+          scons platform=windows target=template_release -j2
+      - run: Get-ChildItem -Recurse demo/addons/motion_matching/bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: motion_matching-windows-x86_64
+          path: demo/addons/motion_matching/bin/libmotionmatching.windows.*.x86_64.dll
+          if-no-files-found: error
+
+  macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git clone --branch ${{ env.GODOT_CPP_BRANCH }} --depth 1 https://github.com/godotengine/godot-cpp godot-cpp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install scons
+      - run: cd godot-cpp && scons platform=macos target=template_debug arch=universal -j$(sysctl -n hw.ncpu)
+      - run: cd godot-cpp && scons platform=macos target=template_release arch=universal -j$(sysctl -n hw.ncpu)
+      - run: scons platform=macos target=template_debug arch=universal -j$(sysctl -n hw.ncpu)
+      - run: scons platform=macos target=template_release arch=universal -j$(sysctl -n hw.ncpu)
+      - run: find demo/addons/motion_matching/bin -type f
+      - uses: actions/upload-artifact@v4
+        with:
+          name: motion_matching-macos-universal
+          path: demo/addons/motion_matching/bin/libmotionmatching.macos.*.framework
+          if-no-files-found: error
