@@ -154,16 +154,22 @@ bool MMFeatureSchema::apply_skeleton_profile(Skeleton3D *p_skeleton) {
 	if (_skeleton_profile.is_null()) {
 		_skeleton_profile.instantiate();
 	}
-	if (!_skeleton_profile->analyze(p_skeleton)) {
+	if (!_skeleton_profile->auto_detect(p_skeleton)) {
 		return false;
 	}
 
 	if (_root_bone.is_empty()) {
-		_root_bone = _skeleton_profile->get_root_bone();
+		_root_bone = _skeleton_profile->get_bone_name(MM_BONE_ROOT);
 	}
 
 	if (_pose_bones.is_empty()) {
-		_pose_bones = _skeleton_profile->get_pose_bones(_include_hands);
+		_pose_bones = _skeleton_profile->get_default_pose_bones();
+		if (_include_hands) {
+			PackedStringArray hand_bones = _skeleton_profile->get_hand_bones();
+			for (int i = 0; i < hand_bones.size(); i++) {
+				_pose_bones.push_back(hand_bones[i]);
+			}
+		}
 	}
 
 	// Drop anything the skeleton does not actually have, so a schema shared
