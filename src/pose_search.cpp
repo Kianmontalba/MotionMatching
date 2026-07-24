@@ -36,8 +36,6 @@ void MMPoseSearch::build(const Ref<MotionMatchingDatabase> &p_database) {
 		_indices.write[i] = i;
 	}
 
-	// A balanced tree over n points has roughly 2n / leaf_size nodes.
-	_nodes.reserve((frames / _leaf_size) * 2 + 8);
 	_build_recursive(0, frames, 0);
 	_built = true;
 }
