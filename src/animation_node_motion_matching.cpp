@@ -14,7 +14,7 @@ void AnimationNodeMotionMatching::bind_controller(MotionMatchingController *p_co
 	_controller_id = p_controller != nullptr ? p_controller->get_instance_id() : ObjectID();
 }
 
-MotionMatchingController *AnimationNodeMotionMatching::_resolve_controller() {
+MotionMatchingController *AnimationNodeMotionMatching::_resolve_controller() const {
 	// The controller registers itself in _ready(). Re-resolving through the
 	// instance id keeps the pointer safe if the node was freed.
 	if (_controller != nullptr && ObjectDB::get_instance(_controller_id) != nullptr) {
@@ -36,7 +36,7 @@ bool AnimationNodeMotionMatching::_has_filter() const {
 // controller. blend_animation() taking an absolute time is exactly what makes
 // a frame jump possible: the clip is entered at 4.7 seconds, not at zero.
 double AnimationNodeMotionMatching::_process(double p_time, bool p_seek, bool p_is_external_seeking,
-		bool p_test_only) {
+		bool p_test_only) const {
 	MotionMatchingController *controller = _resolve_controller();
 	if (controller == nullptr) {
 		return 0.0;
