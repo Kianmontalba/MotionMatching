@@ -1,0 +1,39 @@
+[configuration]
+
+entry_symbol = "motion_matching_library_init"
+compatibility_minimum = "4.3"
+reloadable = true
+
+[libraries]
+
+; Paths below are relative to THIS FILE's own folder (no "res://" prefix),
+; not to the project root. This is the same convention Godot's own
+; GDExtension example projects use, and it is what makes this addon
+; droppable anywhere in a project (e.g. addons/motion_matching/) and
+; still resolve correctly, regardless of where the containing project
+; places it. A "res://..."-prefixed absolute path here would instead
+; always resolve from the PROJECT ROOT's addons/ folder specifically,
+; breaking if this .gdextension file itself lives anywhere else.
+
+windows.debug.x86_64 = "bin/libmotionmatching.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "bin/libmotionmatching.windows.template_release.x86_64.dll"
+
+linux.debug.x86_64 = "bin/libmotionmatching.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "bin/libmotionmatching.linux.template_release.x86_64.so"
+linux.debug.arm64 = "bin/libmotionmatching.linux.template_debug.arm64.so"
+linux.release.arm64 = "bin/libmotionmatching.linux.template_release.arm64.so"
+
+macos.debug = "bin/libmotionmatching.macos.template_debug.framework"
+macos.release = "bin/libmotionmatching.macos.template_release.framework"
+
+android.debug.arm64 = "bin/libmotionmatching.android.template_debug.arm64.so"
+android.release.arm64 = "bin/libmotionmatching.android.template_release.arm64.so"
+android.debug.arm32 = "bin/libmotionmatching.android.template_debug.arm32.so"
+android.release.arm32 = "bin/libmotionmatching.android.template_release.arm32.so"
+
+[dependencies]
+
+android.debug.arm64 = {}
+android.release.arm64 = {}
+android.debug.arm32 = {}
+android.release.arm32 = {}
