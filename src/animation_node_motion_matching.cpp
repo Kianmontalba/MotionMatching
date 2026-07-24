@@ -58,12 +58,18 @@ double AnimationNodeMotionMatching::_process(double p_time, bool p_seek, bool p_
 	// the pose and the root motion reading from the same clock.
 	const double delta = p_time;
 
+	// blend_animation() is inherited from AnimationNode and is not declared
+	// const upstream, even though it only submits weighted samples through
+	// the mixer rather than mutating this node's own state. The const_cast
+	// is safe for that reason; it does not modify any member of this class.
+	AnimationNodeMotionMatching *mutable_self = const_cast<AnimationNodeMotionMatching *>(this);
+
 	if (previous != StringName() && weight < 1.0f) {
-		blend_animation(previous, previous_time, delta, true, p_is_external_seeking, 1.0f - weight,
+		mutable_self->blend_animation(previous, previous_time, delta, true, p_is_external_seeking, 1.0f - weight,
 				Animation::LOOPED_FLAG_NONE);
 	}
 
-	blend_animation(current, current_time, delta, seeked, p_is_external_seeking, weight,
+	mutable_self->blend_animation(current, current_time, delta, seeked, p_is_external_seeking, weight,
 			Animation::LOOPED_FLAG_NONE);
 
 	_last_time = current_time;
