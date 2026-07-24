@@ -1,0 +1,52 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://player.gd" id="1_player"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_1"]
+height = 1.8
+radius = 0.35
+
+[node name="Player" type="CharacterBody3D"]
+script = ExtResource("1_player")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_1")
+
+[node name="Rig" type="Node3D" parent="."]
+
+[node name="GeneralSkeleton" type="Skeleton3D" parent="Rig"]
+unique_name_in_owner = true
+
+[node name="MMFootIKModifier" type="MMFootIKModifier" parent="Rig/GeneralSkeleton"]
+left_upper_leg = "LeftUpperLeg"
+left_lower_leg = "LeftLowerLeg"
+left_foot = "LeftFoot"
+right_upper_leg = "RightUpperLeg"
+right_lower_leg = "RightLowerLeg"
+right_foot = "RightFoot"
+pelvis = "Hips"
+
+[node name="MMWarpModifier" type="MMWarpModifier" parent="Rig/GeneralSkeleton"]
+spine_bones = PackedStringArray("Spine", "Chest", "UpperChest")
+pelvis_bone = "Hips"
+
+[node name="AnimationTree" type="AnimationTree" parent="."]
+callback_mode_process = 1
+
+[node name="MotionMatching" type="MotionMatchingController" parent="."]
+character_path = NodePath("..")
+animation_tree_path = NodePath("../AnimationTree")
+async_search = false
+auto_update = true
+
+[node name="MMDebugDraw" type="MMDebugDraw" parent="."]
+controller_path = NodePath("../MotionMatching")
+
+[node name="CameraPivot" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
+
+[node name="SpringArm3D" type="SpringArm3D" parent="CameraPivot"]
+spring_length = 3.0
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot/SpringArm3D"]
