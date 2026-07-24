@@ -184,7 +184,7 @@ public:
 
 	// Turns a raw query into the normalized space the database is stored in.
     PackedFloat32Array normalize_query(PackedFloat32Array p_query) const;
-    void framemalize_query_ptr(float *r_query) const;
+    void normalize_query_ptr(float *r_query) const;
 
 	// Called by the extractor once every frame has been appended.
 	void finalize(int p_dimension);
