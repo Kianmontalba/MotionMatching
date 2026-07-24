@@ -97,11 +97,12 @@ int MotionMatchingDatabase::get_frame_at_time(int p_animation_id, float p_time) 
 	return entry->get_frame_start() + offset;
 }
 
-void MotionMatchingDatabase::normalize_query(PackedFloat32Array &r_query) const {
-	if (r_query.size() < _dimension) {
-		r_query.resize(_dimension);
+PackedFloat32Array MotionMatchingDatabase::normalize_query(PackedFloat32Array p_query) const {
+	if (p_query.size() < _dimension) {
+		p_query.resize(_dimension);
 	}
-	normalize_query_ptr(r_query.ptrw());
+	normalize_query_ptr(p_query.ptrw());
+	return p_query;
 }
 
 void MotionMatchingDatabase::normalize_query_ptr(float *r_query) const {
