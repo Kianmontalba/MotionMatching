@@ -26,18 +26,23 @@ static HBoxContainer *mm_add_row(VBoxContainer *p_parent, const String &p_label,
 }
 
 MMDatabaseEditor::MMDatabaseEditor() {
+	_resource_picker = memnew(EditorResourcePicker);
+	_resource_picker->set_base_type("MotionMatchingResource");
+	mm_add_row(this, "Motion Matching Resource", _resource_picker);
+
 	_skeleton_path = memnew(LineEdit);
 	_skeleton_path->set_text("%GeneralSkeleton");
 	_skeleton_path->set_placeholder("Node path to the Skeleton3D in the open scene");
 	mm_add_row(this, "Skeleton node path", _skeleton_path);
 
-	_library_path = memnew(LineEdit);
-	_library_path->set_placeholder("res://animations/locomotion.res");
-	mm_add_row(this, "Animation library", _library_path);
-
-	_output_path = memnew(LineEdit);
-	_output_path->set_text("res://motion_matching/database.res");
-	mm_add_row(this, "Save database to", _output_path);
+	// Backed by the resource above, not a typed-in path: picking (or
+	// dropping) a library here writes it straight onto the Motion Matching
+	// Resource and saves that resource to disk immediately, so it survives
+	// closing the dock, switching scenes, or an addon reload -- none of
+	// which this control's own state would otherwise survive.
+	_library_picker = memnew(EditorResourcePicker);
+	_library_picker->set_base_type("AnimationLibrary");
+	mm_add_row(this, "Animation library", _library_picker);
 
 	_sample_rate = memnew(SpinBox);
 	_sample_rate->set_min(10);
@@ -84,11 +89,13 @@ MMDatabaseEditor::MMDatabaseEditor() {
 }
 
 void MMDatabaseEditor::_ready() {
+	_resource_picker->connect("resource_changed", Callable(this, "_on_resource_picked"));
+	_library_picker->connect("resource_changed", Callable(this, "_on_library_picked"));
 	_scan_button->connect("pressed", Callable(this, "_on_scan_pressed"));
 	_build_button->connect("pressed", Callable(this, "_on_build_pressed"));
 	_save_button->connect("pressed", Callable(this, "_on_save_pressed"));
 	_validate_button->connect("pressed", Callable(this, "_on_validate_pressed"));
-	_log_line("Ready. Point at a Skeleton3D in the open scene, then scan a library.");
+	_log_line("Ready. Assign a Motion Matching Resource, point at a Skeleton3D, then scan a library.");
 }
 
 void MMDatabaseEditor::_log_line(const String &p_text, const Color &p_color) {
@@ -114,10 +121,56 @@ Skeleton3D *MMDatabaseEditor::_resolve_skeleton() {
 	return skeleton;
 }
 
-void MMDatabaseEditor::_on_scan_pressed() {
-	_library = ResourceLoader::get_singleton()->load(_library_path->get_text());
+void MMDatabaseEditor::_on_resource_picked(const Ref<Resource> &p_resource) {
+	_mm_resource = p_resource;
+	if (_mm_resource.is_null()) {
+		_log_line("Motion Matching Resource cleared.", Color(1, 0.85f, 0.4f));
+		return;
+	}
+
+	// Load whatever this resource already has assigned, rather than leaving
+	// the dock showing something unrelated to the resource just picked.
+	_library_picker->set_edited_resource(_mm_resource->get_animation_library());
+	_library = _mm_resource->get_animation_library();
+	_database = _mm_resource->get_database();
+	_schema = _mm_resource->get_schema();
+
+	if (_library.is_valid()) {
+		_clip_settings = MMAnimationLibraryTools::auto_tag_library(_library);
+		_populate_table();
+	} else {
+		_clip_table->clear();
+	}
+
+	_log_line("Loaded " + _mm_resource->get_path(), Color(0.5f, 1.0f, 0.6f));
+}
+
+void MMDatabaseEditor::_on_library_picked(const Ref<Resource> &p_resource) {
+	_library = p_resource;
+
+	if (_mm_resource.is_valid()) {
+		// Persisted immediately, not just held in the dock's own memory --
+		// this is what makes the pick survive closing the dock or an addon
+		// reload, unlike a typed-in path that lived only in a LineEdit.
+		_mm_resource->set_animation_library(_library);
+		if (!_mm_resource->get_path().is_empty()) {
+			const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
+			if (error != OK) {
+				_log_line(vformat("Could not save the library pick back to %s (error %d).",
+								_mm_resource->get_path(), (int)error),
+						Color(1, 0.5f, 0.4f));
+			}
+		} else {
+			_log_line(
+					"Motion Matching Resource has not been saved to disk yet, so this pick will "
+					"only last for the current editor session. Save it once from the Inspector "
+					"and the pick will start persisting automatically.",
+					Color(1, 0.85f, 0.4f));
+		}
+	}
+
 	if (_library.is_null()) {
-		_log_line("Could not load that animation library.", Color(1, 0.5f, 0.4f));
+		_clip_table->clear();
 		return;
 	}
 
@@ -127,6 +180,14 @@ void MMDatabaseEditor::_on_scan_pressed() {
 	_populate_table();
 	_log_line(vformat("Scanned %d clips and suggested tags for each.",
 			_library->get_animation_list().size()));
+}
+
+void MMDatabaseEditor::_on_scan_pressed() {
+	// Re-reads whatever is currently assigned rather than a remembered path,
+	// so pressing Scan after e.g. calling refresh_all() on an
+	// MMAnimationLibrary picks up files that were added or removed since the
+	// library was first picked.
+	_on_library_picked(_library_picker->get_edited_resource());
 }
 
 void MMDatabaseEditor::_populate_table() {
@@ -214,15 +275,48 @@ void MMDatabaseEditor::_on_build_pressed() {
 
 void MMDatabaseEditor::_on_save_pressed() {
 	if (_database.is_null()) {
-		_log_line("Nothing to save yet.", Color(1, 0.85f, 0.4f));
+		_log_line("Nothing to save yet. Press Build database first.", Color(1, 0.85f, 0.4f));
 		return;
 	}
-	const Error error = ResourceSaver::get_singleton()->save(_database, _output_path->get_text());
+	if (_mm_resource.is_null()) {
+		_log_line("Assign a Motion Matching Resource above first -- the database always saves "
+				  "onto that resource's own database slot, never a separate guessed path.",
+				Color(1, 0.5f, 0.4f));
+		return;
+	}
+
+	// Always targets the SAME database this resource already points at (if
+	// it has one), overwriting it in place, so anything already wired up to
+	// that .res path -- a running scene, another resource referencing it --
+	// keeps working against the freshly built data without needing to be
+	// re-pointed. Only when there is no existing database yet is a new path
+	// chosen, next to the Motion Matching Resource itself.
+	String database_path;
+	if (_mm_resource->get_database().is_valid() && !_mm_resource->get_database()->get_path().is_empty()) {
+		database_path = _mm_resource->get_database()->get_path();
+	} else if (!_mm_resource->get_path().is_empty()) {
+		database_path = _mm_resource->get_path().get_base_dir().path_join("database.res");
+	} else {
+		_log_line(
+				"Save the Motion Matching Resource to disk first (from the Inspector), so there "
+				"is a folder to save the database next to.",
+				Color(1, 0.5f, 0.4f));
+		return;
+	}
+
+	_mm_resource->set_database(_database);
+
+	const Error error = ResourceSaver::get_singleton()->save(_database, database_path);
 	if (error != OK) {
 		_log_line(vformat("Save failed with error %d.", (int)error), Color(1, 0.5f, 0.4f));
 		return;
 	}
-	_log_line("Saved " + _output_path->get_text(), Color(0.5f, 1.0f, 0.6f));
+
+	if (!_mm_resource->get_path().is_empty()) {
+		ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
+	}
+
+	_log_line("Saved " + database_path, Color(0.5f, 1.0f, 0.6f));
 }
 
 void MMDatabaseEditor::_on_clip_edited() {
@@ -237,6 +331,8 @@ void MMDatabaseEditor::_on_clip_edited() {
 }
 
 void MMDatabaseEditor::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("_on_resource_picked", "resource"), &MMDatabaseEditor::_on_resource_picked);
+	ClassDB::bind_method(D_METHOD("_on_library_picked", "resource"), &MMDatabaseEditor::_on_library_picked);
 	ClassDB::bind_method(D_METHOD("_on_scan_pressed"), &MMDatabaseEditor::_on_scan_pressed);
 	ClassDB::bind_method(D_METHOD("_on_build_pressed"), &MMDatabaseEditor::_on_build_pressed);
 	ClassDB::bind_method(D_METHOD("_on_save_pressed"), &MMDatabaseEditor::_on_save_pressed);
