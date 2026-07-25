@@ -45,8 +45,6 @@ public:
 
 	String _get_caption() const override;
 	bool _has_filter() const override;
-	AnimationNode::NodeTimeInfo _process_animation_node(double p_time, bool p_seek,
-			bool p_is_external_seeking, bool p_test_only);
 
 	double _process(double p_time, bool p_seek, bool p_is_external_seeking, bool p_test_only) const override;
 };
