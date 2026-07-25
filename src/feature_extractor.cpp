@@ -585,8 +585,18 @@ bool MMFeatureExtractor::append_animation(const Ref<MotionMatchingDatabase> &p_d
 		}
 
 		const Transform3D root = root_track[f];
-		const Basis inverse_basis = root.basis.inverse();
-		const Transform3D inverse_root = root.affine_inverse();
+		// Some rigs' root/hip bone rest orientation does not point in the
+		// direction the character actually walks (commonly 180 degrees
+		// off on Mixamo-style rigs). root_yaw_offset_degrees recalibrates
+		// every local-space projection below -- velocity, pose, and
+		// trajectory alike -- so they all agree on the same forward.
+		const Basis yaw_correction = _root_yaw_offset_degrees != 0.0f
+				? Basis(Vector3(0, 1, 0), Math::deg_to_rad(_root_yaw_offset_degrees))
+				: Basis();
+		const Basis corrected_basis = yaw_correction * root.basis;
+		const Basis inverse_basis = corrected_basis.inverse();
+		const Transform3D corrected_root(corrected_basis, root.origin);
+		const Transform3D inverse_root = corrected_root.affine_inverse();
 
 		const int previous = loop ? (f - 1 + frame_count) % frame_count : MAX(0, f - 1);
 		const int next = loop ? (f + 1) % frame_count : MIN(frame_count - 1, f + 1);
@@ -842,6 +852,7 @@ void MMFeatureExtractor::_bind_methods() {
 	MM_BIND_PROPERTY(MMFeatureExtractor, Variant::FLOAT, foot_contact_height_ratio)
 	MM_BIND_PROPERTY(MMFeatureExtractor, Variant::BOOL, auto_detect_profile)
 	MM_BIND_PROPERTY(MMFeatureExtractor, Variant::BOOL, auto_configure_schema)
+	MM_BIND_PROPERTY(MMFeatureExtractor, Variant::FLOAT, root_yaw_offset_degrees)
 
 	ClassDB::bind_method(D_METHOD("analyze_animation", "skeleton", "animation"),
 			&MMFeatureExtractor::analyze_animation);
