@@ -98,6 +98,11 @@ private:
 	float _foot_contact_height_ratio = 0.12f; // Hip heights.
 	bool _auto_detect_profile = true;
 	bool _auto_configure_schema = true;
+	// Some rigs bind a root/hip bone whose own rest-pose forward axis does
+	// not match the direction the character actually walks (Mixamo-style
+	// rigs commonly end up 180 degrees off after import). Rather than
+	// guess, this lets the user calibrate it once per skeleton profile.
+	float _root_yaw_offset_degrees = 0.0f;
 
 	String _progress_label;
 	float _progress = 0.0f;
@@ -127,10 +132,11 @@ public:
 	Ref<MMClipAnalyzer> get_analyzer() const { return _analyzer; }
 
 	MM_ACCESSORS(float, sample_rate)
-	MM_ACCESSORS(float, foot_contact_speed_ratio)
+    MM_ACCESSORS(float, foot_contact_speed_ratio)
 	MM_ACCESSORS(float, foot_contact_height_ratio)
 	MM_ACCESSORS(bool, auto_detect_profile)
 	MM_ACCESSORS(bool, auto_configure_schema)
+	MM_ACCESSORS(float, root_yaw_offset_degrees)
 
 	float get_progress() const { return _progress; }
 	String get_progress_label() const { return _progress_label; }
