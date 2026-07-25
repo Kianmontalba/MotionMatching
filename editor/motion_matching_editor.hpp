@@ -56,6 +56,19 @@ private:
 	Tree *_clip_table = nullptr;
 	RichTextLabel *_log = nullptr;
 
+	// Manual bone-role mapping, for rigs auto_detect() cannot read (unusual
+	// naming, a non-humanoid skeleton, ...). Off (auto-detect on) by default;
+	// switching it on reveals one dropdown per role, each populated from
+	// whatever Skeleton3D is currently resolved.
+	CheckBox *_auto_detect_profile = nullptr;
+	Button *_load_bones_button = nullptr;
+	Tree *_bone_mapping_tree = nullptr;
+	PackedStringArray _bone_names_cache;
+
+	void _on_load_bones_pressed();
+	void _on_auto_detect_toggled(bool p_pressed);
+	Ref<MMSkeletonProfile> _build_manual_profile() const;
+
 	Ref<MotionMatchingResource> _mm_resource;
 	Ref<AnimationLibrary> _library;
 	Ref<MotionMatchingDatabase> _database;
