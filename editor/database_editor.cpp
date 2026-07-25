@@ -44,6 +44,48 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_library_picker->set_base_type("AnimationLibrary");
 	mm_add_row(this, "Animation library", _library_picker);
 
+	_auto_detect_profile = memnew(CheckBox);
+	_auto_detect_profile->set_text("Auto-detect skeleton profile");
+	_auto_detect_profile->set_pressed(true);
+	add_child(_auto_detect_profile);
+
+	_load_bones_button = memnew(Button);
+	_load_bones_button->set_text("Load bones from skeleton");
+	_load_bones_button->set_visible(false);
+	add_child(_load_bones_button);
+
+	// One row per MMBoneRole, in enum order. Each "Bone" cell becomes a
+	// dropdown (CELL_MODE_RANGE) once Load bones from skeleton fills in the
+	// option list; empty text on that column, and no dropdown, until then --
+	// there is nothing to pick from before a skeleton has been resolved.
+	_bone_mapping_tree = memnew(Tree);
+	_bone_mapping_tree->set_columns(2);
+	_bone_mapping_tree->set_column_titles_visible(true);
+	_bone_mapping_tree->set_column_title(0, "Role");
+	_bone_mapping_tree->set_column_title(1, "Bone");
+	_bone_mapping_tree->set_custom_minimum_size(Vector2(0, 220));
+	_bone_mapping_tree->set_visible(false);
+	{
+		static const char *role_labels[] = {
+			"Root", "Pelvis", "Spine", "Chest", "Neck", "Head",
+			"Left Upper Leg", "Left Lower Leg", "Left Foot", "Left Toe",
+			"Right Upper Leg", "Right Lower Leg", "Right Foot", "Right Toe",
+			"Left Shoulder", "Left Upper Arm", "Left Lower Arm", "Left Hand",
+			"Right Shoulder", "Right Upper Arm", "Right Lower Arm", "Right Hand"
+		};
+		TreeItem *root = _bone_mapping_tree->create_item();
+		_bone_mapping_tree->set_hide_root(true);
+		for (int i = 0; i < MM_BONE_ROLE_MAX; i++) {
+			TreeItem *item = _bone_mapping_tree->create_item(root);
+			item->set_text(0, role_labels[i]);
+			item->set_cell_mode(1, TreeItem::CELL_MODE_RANGE);
+			item->set_editable(1, true);
+			item->set_text(1, "(none)");
+			item->set_range(1, 0);
+		}
+	}
+	add_child(_bone_mapping_tree);
+
 	_sample_rate = memnew(SpinBox);
 	_sample_rate->set_min(10);
 	_sample_rate->set_max(120);
@@ -91,6 +133,8 @@ MMDatabaseEditor::MMDatabaseEditor() {
 void MMDatabaseEditor::_ready() {
 	_resource_picker->connect("resource_changed", Callable(this, "_on_resource_picked"));
 	_library_picker->connect("resource_changed", Callable(this, "_on_library_picked"));
+	_auto_detect_profile->connect("toggled", Callable(this, "_on_auto_detect_toggled"));
+	_load_bones_button->connect("pressed", Callable(this, "_on_load_bones_pressed"));
 	_scan_button->connect("pressed", Callable(this, "_on_scan_pressed"));
 	_build_button->connect("pressed", Callable(this, "_on_build_pressed"));
 	_save_button->connect("pressed", Callable(this, "_on_save_pressed"));
@@ -218,6 +262,51 @@ void MMDatabaseEditor::_populate_table() {
 	}
 }
 
+void MMDatabaseEditor::_on_auto_detect_toggled(bool p_pressed) {
+	_load_bones_button->set_visible(!p_pressed);
+	_bone_mapping_tree->set_visible(!p_pressed);
+}
+
+void MMDatabaseEditor::_on_load_bones_pressed() {
+	Skeleton3D *skeleton = _resolve_skeleton();
+	if (skeleton == nullptr) {
+		return;
+	}
+
+	_bone_names_cache = skeleton->get_concatenated_bone_names().split(",");
+	// Index 0 is always "leave this role unmapped" -- a rig missing a role
+	// entirely (no tail bones, no toes, ...) is normal, not an error.
+	_bone_names_cache.insert(0, "(none)");
+
+	const String option_list = String(",").join(_bone_names_cache);
+	TreeItem *item = _bone_mapping_tree->get_root() != nullptr ? _bone_mapping_tree->get_root()->get_first_child() : nullptr;
+	while (item != nullptr) {
+		item->set_text(1, option_list);
+		item->set_range(1, 0);
+		item = item->get_next();
+	}
+
+	_log_line(vformat("Loaded %d bones from %s.", _bone_names_cache.size() - 1, skeleton->get_name()),
+			Color(0.5f, 1.0f, 0.6f));
+}
+
+Ref<MMSkeletonProfile> MMDatabaseEditor::_build_manual_profile() const {
+	Ref<MMSkeletonProfile> profile;
+	profile.instantiate();
+
+	TreeItem *item = _bone_mapping_tree->get_root() != nullptr ? _bone_mapping_tree->get_root()->get_first_child() : nullptr;
+	int role = 0;
+	while (item != nullptr && role < MM_BONE_ROLE_MAX) {
+		const int index = (int)item->get_range(1);
+		if (index > 0 && index < _bone_names_cache.size()) {
+			profile->set_bone_name(role, _bone_names_cache[index]);
+		}
+		item = item->get_next();
+		role++;
+	}
+	return profile;
+}
+
 void MMDatabaseEditor::_on_validate_pressed() {
 	Skeleton3D *skeleton = _resolve_skeleton();
 	if (skeleton == nullptr || _library.is_null()) {
@@ -258,11 +347,20 @@ void MMDatabaseEditor::_on_build_pressed() {
 	extractor->set_schema(_schema);
 	extractor->set_sample_rate((float)_sample_rate->get_value());
 
+	if (!_auto_detect_profile->is_pressed()) {
+		extractor->set_auto_detect_profile(false);
+		extractor->set_profile(_build_manual_profile());
+	}
+
 	_database = extractor->build_database(skeleton, _library, _clip_settings);
 	_progress->set_value(1.0);
 
 	if (_database.is_null()) {
-		_log_line("Build failed.", Color(1, 0.5f, 0.4f));
+		_log_line(
+				"Build failed. If \"Auto-detect skeleton profile\" is on, check the Output/"
+				"Debugger panel for a \"Skeleton profile detection failed\" message -- or turn "
+				"it off and map bones manually below instead.",
+				Color(1, 0.5f, 0.4f));
 		return;
 	}
 
@@ -333,6 +431,8 @@ void MMDatabaseEditor::_on_clip_edited() {
 void MMDatabaseEditor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_resource_picked", "resource"), &MMDatabaseEditor::_on_resource_picked);
 	ClassDB::bind_method(D_METHOD("_on_library_picked", "resource"), &MMDatabaseEditor::_on_library_picked);
+	ClassDB::bind_method(D_METHOD("_on_auto_detect_toggled", "pressed"), &MMDatabaseEditor::_on_auto_detect_toggled);
+	ClassDB::bind_method(D_METHOD("_on_load_bones_pressed"), &MMDatabaseEditor::_on_load_bones_pressed);
 	ClassDB::bind_method(D_METHOD("_on_scan_pressed"), &MMDatabaseEditor::_on_scan_pressed);
 	ClassDB::bind_method(D_METHOD("_on_build_pressed"), &MMDatabaseEditor::_on_build_pressed);
 	ClassDB::bind_method(D_METHOD("_on_save_pressed"), &MMDatabaseEditor::_on_save_pressed);
