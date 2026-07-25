@@ -105,7 +105,7 @@ void MotionMatchingController::_bind_animation_tree() {
 	if (_animation_tree == nullptr) {
 		return;
 	}
-	_bind_animation_node(_animation_tree->get_tree_root());
+	_bind_animation_node(Ref<AnimationNode>(_animation_tree->get_tree_root().ptr()));
 }
 
 // Walks the tree so the node can sit anywhere: as the root, or as one node
