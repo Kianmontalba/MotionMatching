@@ -13,6 +13,7 @@
 #include "traversal.hpp"
 
 #include <godot_cpp/classes/animation_library.hpp>
+#include <godot_cpp/classes/animation_node.hpp>
 #include <godot_cpp/classes/animation_tree.hpp>
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/classes/node3d.hpp>
