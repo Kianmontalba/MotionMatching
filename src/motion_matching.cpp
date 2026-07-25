@@ -122,15 +122,12 @@ bool MotionMatchingController::_bind_animation_node(const Ref<AnimationNode> &p_
 		return true;
 	}
 
-	Ref<AnimationNodeBlendTree> blend_tree = p_node;
-	if (blend_tree.is_valid()) {
-		const PackedStringArray names = blend_tree->get_node_list();
-		for (int i = 0; i < names.size(); i++) {
-			if (_bind_animation_node(blend_tree->get_node(names[i]))) {
-				return true;
-			}
-		}
-	}
+	// NOTE: recursing into an AnimationNodeBlendTree to find a nested
+	// AnimationNodeMotionMatching automatically is not supported, because
+	// AnimationNodeBlendTree::get_node_list() is not exposed by the
+	// godot-cpp API version this addon is built against. If this node is
+	// not the AnimationTree's root, assign animation_tree_path so it points
+	// somewhere the node can be resolved directly instead.
 	return false;
 }
 
