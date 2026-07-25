@@ -96,7 +96,7 @@ void MMDatabaseEditor::_log_line(const String &p_text, const Color &p_color) {
 		return;
 	}
 	_log->push_color(p_color);
-	_log->add_text(p_text + "\n");
+	_log->add_text(p_text + String("\n"));
 	_log->pop();
 }
 
