@@ -13,7 +13,7 @@ StringName MMAnimationEntry::get_qualified_name() const {
 	if (_library_name.is_empty()) {
 		return StringName(_animation_name);
 	}
-	return StringName(_library_name + "/" + _animation_name);
+	return StringName(_library_name + String("/") + _animation_name);
 }
 
 void MMAnimationEntry::_bind_methods() {
