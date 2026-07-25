@@ -520,7 +520,13 @@ bool MMFeatureExtractor::append_animation(const Ref<MotionMatchingDatabase> &p_d
 
 	const PackedStringArray bone_names = _schema->get_pose_bones();
 	const double length = p_animation->get_length();
-	const bool loop = p_animation->get_loop_mode() != Animation::LOOP_NONE;
+	// Always true: a database entry that stops advancing when it runs out
+	// of frames would freeze the character rather than search for
+	// something else, and there is no per-clip reason to want that here --
+	// the search itself is what decides when to leave a clip, not the
+	// clip's own length. This intentionally ignores the source Animation's
+	// own loop_mode (which several imported clips had left at LOOP_NONE).
+	const bool loop = true;
 	const double step = 1.0 / (double)_sample_rate;
 	const int frame_count = MAX(1, (int)Math::floor(length / step) + 1);
 	const int bone_count = bone_names.size();
