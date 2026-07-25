@@ -14,6 +14,7 @@
 #include <godot_cpp/classes/button.hpp>
 #include <godot_cpp/classes/check_box.hpp>
 #include <godot_cpp/classes/editor_plugin.hpp>
+#include <godot_cpp/classes/editor_resource_picker.hpp>
 #include <godot_cpp/classes/h_slider.hpp>
 #include <godot_cpp/classes/label.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
@@ -39,8 +40,13 @@ class MMDatabaseEditor : public VBoxContainer {
 
 private:
 	LineEdit *_skeleton_path = nullptr;
-	LineEdit *_library_path = nullptr;
-	LineEdit *_output_path = nullptr;
+	// The dock's anchor: whichever MotionMatchingResource the user is
+	// preparing. Everything else here reads from and writes back to this
+	// same resource (and, in turn, its own path on disk) instead of holding
+	// its own copy of a path string, so nothing is lost if the dock's
+	// controls are ever torn down and recreated (e.g. a GDExtension reload).
+	EditorResourcePicker *_resource_picker = nullptr;
+	EditorResourcePicker *_library_picker = nullptr;
 	SpinBox *_sample_rate = nullptr;
 	Button *_scan_button = nullptr;
 	Button *_build_button = nullptr;
@@ -50,11 +56,14 @@ private:
 	Tree *_clip_table = nullptr;
 	RichTextLabel *_log = nullptr;
 
+	Ref<MotionMatchingResource> _mm_resource;
 	Ref<AnimationLibrary> _library;
 	Ref<MotionMatchingDatabase> _database;
 	Ref<MMFeatureSchema> _schema;
 	Dictionary _clip_settings;
 
+	void _on_resource_picked(const Ref<Resource> &p_resource);
+	void _on_library_picked(const Ref<Resource> &p_resource);
 	void _on_scan_pressed();
 	void _on_build_pressed();
 	void _on_save_pressed();
