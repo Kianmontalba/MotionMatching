@@ -48,6 +48,11 @@ private:
 	EditorResourcePicker *_resource_picker = nullptr;
 	EditorResourcePicker *_library_picker = nullptr;
 	SpinBox *_sample_rate = nullptr;
+	// Corrects a root/hip bone rest orientation that does not point the way
+	// the character actually walks (common on Mixamo-style rigs, usually
+	// off by exactly 180). Applied to the extractor at build time, same as
+	// sample rate.
+	SpinBox *_root_yaw_offset = nullptr;
 	Button *_scan_button = nullptr;
 	Button *_build_button = nullptr;
 	Button *_save_button = nullptr;
