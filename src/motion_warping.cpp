@@ -65,7 +65,15 @@ Transform3D MMMotionWarp::warp_delta(const Transform3D &p_delta, const Transform
 
 		if (window.warp_rotation) {
 			const Quaternion current = p_current.basis.get_rotation_quaternion();
-			const Quaternion target = window.target.basis.get_rotation_quaternion();
+			Quaternion target = window.target.basis.get_rotation_quaternion();
+			// Clamp how far off the current orientation the target is allowed
+			// to pull, same spirit as the translation_limit above -- a bad or
+			// distant target should not be able to snap the character's
+			// facing past what warping is meant to look like.
+			const float angle = current.angle_to(target);
+			if (angle > _rotation_limit && angle > 0.00001f) {
+				target = current.slerp(target, _rotation_limit / angle);
+			}
 			const Quaternion correction = current.slerp(target, ratio) * current.inverse();
 			result.basis = Basis(correction) * result.basis;
 		}
@@ -153,7 +161,7 @@ void MMWarpModifier::_process_modification() {
 	}
 
 	// Smoothed so a sudden change of stick direction does not snap the hips.
-	const float alpha = 1.0f - Math::exp(-0.6931472f * 0.016f / MAX(_smoothing_halflife, 0.0001f));
+	const float alpha = 1.0f - Math::exp(-0.6931472f * get_process_delta_time() / MAX(_smoothing_halflife, 0.0001f));
 	_current_orientation = Math::lerp(_current_orientation, _orientation_angle * _orientation_blend, alpha);
 	_current_stride = Math::lerp(_current_stride, _stride_scale, alpha);
 	_current_lean = Math::lerp(_current_lean, _lean_amount, alpha);
