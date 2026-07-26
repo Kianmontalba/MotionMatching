@@ -24,9 +24,7 @@ public:
 	// handed to the extractor.
 	static Dictionary auto_tag_library(const Ref<AnimationLibrary> &p_library) {
 		Dictionary settings;
-		if (p_library.is_null()) {
-			return settings;
-		}
+		ERR_FAIL_COND_V_MSG(p_library.is_null(), settings, "auto_tag_library: library is null.");
 		const PackedStringArray names = p_library->get_animation_list();
 		for (int i = 0; i < names.size(); i++) {
 			const int tags = MMFeatureExtractor::guess_tags_from_name(names[i]);
@@ -43,9 +41,9 @@ public:
 	static Array validate_library(const Ref<AnimationLibrary> &p_library, Skeleton3D *p_skeleton,
 			const Ref<MMFeatureSchema> &p_schema) {
 		Array issues;
-		if (p_library.is_null() || p_skeleton == nullptr || p_schema.is_null()) {
-			return issues;
-		}
+		ERR_FAIL_COND_V_MSG(p_library.is_null(), issues, "validate_library: library is null.");
+		ERR_FAIL_NULL_V_MSG(p_skeleton, issues, "validate_library: skeleton is null.");
+		ERR_FAIL_COND_V_MSG(p_schema.is_null(), issues, "validate_library: schema is null.");
 
 		const String root_bone = p_schema->get_root_bone();
 		const PackedStringArray tracked = p_schema->get_pose_bones();
