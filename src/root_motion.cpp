@@ -69,7 +69,7 @@ void MMRootMotion::update(double p_delta, int p_current_frame, int p_previous_fr
 }
 
 void MMRootMotion::notify_frame_jump(int p_new_frame) {
-	if (_database.is_null() || p_new_frame < 0) {
+	if (_database.is_null() || p_new_frame < 0 || p_new_frame >= _database->get_frame_count()) {
 		return;
 	}
 	// Adopt the new clip's velocity immediately rather than easing into it, so
