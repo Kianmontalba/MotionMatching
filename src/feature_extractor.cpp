@@ -290,7 +290,12 @@ bool MMFeatureExtractor::_prepare(Skeleton3D *p_skeleton) {
 void MMFeatureExtractor::_resolve_pose_bones(Skeleton3D *p_skeleton) {
 	const PackedStringArray bone_names = _schema->get_pose_bones();
 	_pose_bone_indices.resize(bone_names.size());
-	_foot_slots.clear();
+	// Fixed by role, not by the order feet happen to appear in pose_bones:
+	// slot 0 is always left, slot 1 is always right, matching the bit 0 =
+	// left foot / bit 1 = right foot convention the baked contact flags use.
+	_foot_slots.resize(2);
+	_foot_slots.write[0] = -1;
+	_foot_slots.write[1] = -1;
 
 	const String left_foot = _profile.is_valid() ? _profile->get_bone_name(MM_BONE_LEFT_FOOT) : String();
 	const String right_foot = _profile.is_valid() ? _profile->get_bone_name(MM_BONE_RIGHT_FOOT) : String();
@@ -300,9 +305,9 @@ void MMFeatureExtractor::_resolve_pose_bones(Skeleton3D *p_skeleton) {
 		// Contact detection is driven by role, not by looking for the word
 		// "foot" in a bone name.
 		if (!left_foot.is_empty() && bone_names[i] == left_foot) {
-			_foot_slots.push_back(i);
+			_foot_slots.write[0] = i;
 		} else if (!right_foot.is_empty() && bone_names[i] == right_foot) {
-			_foot_slots.push_back(i);
+			_foot_slots.write[1] = i;
 		}
 	}
 }
@@ -650,7 +655,15 @@ bool MMFeatureExtractor::append_animation(const Ref<MotionMatchingDatabase> &p_d
 			row[position_offset + t * 2 + 0] = local.origin.x;
 			row[position_offset + t * 2 + 1] = local.origin.z;
 
-			Vector3 direction = -local.basis.get_column(2);
+			// Direction is a relative rotation between two frames of the same
+			// rig, not a point in space -- a constant yaw offset applied to
+			// only the current frame's side (as inverse_root.basis is here)
+			// would re-introduce that offset as a spurious extra rotation on
+			// top of the real relative angle. Since the same constant offset
+			// would apply identically to every frame of this clip, it always
+			// cancels out of a frame-to-frame relative angle, so the raw,
+			// uncorrected root basis is used here instead of inverse_root.
+			Vector3 direction = -(root.basis.inverse() * future.basis).get_column(2);
 			direction.y = 0.0f;
 			if (direction.length_squared() > 0.000001f) {
 				direction.normalize();
