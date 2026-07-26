@@ -248,7 +248,6 @@ bool MMFeatureExtractor::_prepare(Skeleton3D *p_skeleton) {
 			ERR_PRINT("Skeleton profile detection failed: " + _profile->get_detection_report());
 			return false;
 		}
-}
 	}
 	if (_analyzer.is_null()) {
 		_analyzer.instantiate();
@@ -519,8 +518,6 @@ bool MMFeatureExtractor::append_animation(const Ref<MotionMatchingDatabase> &p_d
 
 	ClipExtractionResult result;
 	if (!_extract_clip(p_skeleton, p_animation, p_name, p_library, p_category, p_tags, result)) {
-
-if (!_extract_clip(p_skeleton, p_animation, p_name, p_library, p_category, p_tags, result)) {
 		return false;
 	}
 	_commit_clip_result(p_database, result);
