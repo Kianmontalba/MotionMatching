@@ -167,6 +167,8 @@ void MotionMatchingResource::_bind_methods() {
 	MM_BIND_PROPERTY(MotionMatchingResource, Variant::FLOAT, blend_time)
 	MM_BIND_PROPERTY(MotionMatchingResource, Variant::FLOAT, minimum_blend_time)
 	MM_BIND_PROPERTY(MotionMatchingResource, Variant::BOOL, allow_same_clip_jump)
+	MM_BIND_PROPERTY(MotionMatchingResource, Variant::FLOAT, min_playback_speed)
+	MM_BIND_PROPERTY(MotionMatchingResource, Variant::FLOAT, max_playback_speed)
 
 	ADD_GROUP("Trajectory", "");
 	MM_BIND_PROPERTY(MotionMatchingResource, Variant::FLOAT, trajectory_halflife_position)
