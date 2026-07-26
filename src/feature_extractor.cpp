@@ -4,6 +4,9 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#include <atomic>
+#include <vector>
+
 using namespace godot;
 
 // Projects a transform onto the ground plane, keeping only its yaw. Used when
@@ -245,6 +248,7 @@ bool MMFeatureExtractor::_prepare(Skeleton3D *p_skeleton) {
 			ERR_PRINT("Skeleton profile detection failed: " + _profile->get_detection_report());
 			return false;
 		}
+}
 	}
 	if (_analyzer.is_null()) {
 		_analyzer.instantiate();
@@ -322,10 +326,9 @@ Dictionary MMFeatureExtractor::analyze_animation(Skeleton3D *p_skeleton, const R
 		return empty;
 	}
 
-	if (_sampler.is_null()) {
-		_sampler.instantiate();
-	}
-	if (!_sampler->bind(p_skeleton, p_animation, _profile->get_bone_name(MM_BONE_ROOT),
+	Ref<MMPoseSampler> sampler;
+	sampler.instantiate();
+	if (!sampler->bind(p_skeleton, p_animation, _profile->get_bone_name(MM_BONE_ROOT),
 				_profile->get_bone_name(MM_BONE_PELVIS))) {
 		return empty;
 	}
@@ -365,15 +368,15 @@ Dictionary MMFeatureExtractor::analyze_animation(Skeleton3D *p_skeleton, const R
 
 	for (int f = 0; f < frames; f++) {
 		const double time = MIN((double)f * step, length);
-		_sampler->sample(time);
+		sampler->sample(time);
 
-		const Transform3D root = _sampler->get_root_transform();
+		const Transform3D root = sampler->get_root_transform();
 		const Vector3 position = root.origin;
 		if (f == 0) {
 			first_position = position;
 			previous_root = position;
-			previous_left = left_foot >= 0 ? _sampler->get_model_transform(left_foot).origin : Vector3();
-			previous_right = right_foot >= 0 ? _sampler->get_model_transform(right_foot).origin : Vector3();
+			previous_left = left_foot >= 0 ? sampler->get_model_transform(left_foot).origin : Vector3();
+			previous_right = right_foot >= 0 ? sampler->get_model_transform(right_foot).origin : Vector3();
 			const Vector3 forward = -root.basis.get_column(2);
 			previous_yaw = Math::atan2(forward.x, -forward.z);
 		}
@@ -416,14 +419,14 @@ Dictionary MMFeatureExtractor::analyze_animation(Skeleton3D *p_skeleton, const R
 		// planted. No naming convention involved.
 		bool planted = false;
 		if (left_foot >= 0) {
-			const Vector3 foot = _sampler->get_model_transform(left_foot).origin;
+			const Vector3 foot = sampler->get_model_transform(left_foot).origin;
 			const float foot_speed = (foot - previous_left).length() / (float)step;
 			const float height = foot.y - position.y;
 			planted = planted || (foot_speed < contact_speed && height < contact_height);
 			previous_left = foot;
 		}
 		if (right_foot >= 0) {
-			const Vector3 foot = _sampler->get_model_transform(right_foot).origin;
+			const Vector3 foot = sampler->get_model_transform(right_foot).origin;
 			const float foot_speed = (foot - previous_right).length() / (float)step;
 			const float height = foot.y - position.y;
 			planted = planted || (foot_speed < contact_speed && height < contact_height);
@@ -439,7 +442,7 @@ Dictionary MMFeatureExtractor::analyze_animation(Skeleton3D *p_skeleton, const R
 		}
 
 		if (pelvis >= 0) {
-			const float pelvis_height = _sampler->get_model_transform(pelvis).origin.y - position.y;
+			const float pelvis_height = sampler->get_model_transform(pelvis).origin.y - position.y;
 			minimum_height = MIN(minimum_height, pelvis_height);
 			maximum_height = MAX(maximum_height, pelvis_height);
 			if (pelvis_height < crouch_height) {
@@ -463,7 +466,7 @@ Dictionary MMFeatureExtractor::analyze_animation(Skeleton3D *p_skeleton, const R
 	stats.lateral_ratio = travel_sum > 0.0001f ? lateral_sum / travel_sum : 0.0f;
 	stats.backward_ratio = travel_sum > 0.0001f ? backward_sum / travel_sum : 0.0f;
 
-	_sampler->unbind();
+	sampler->unbind();
 	return MMClipAnalyzer::stats_to_dictionary(stats);
 }
 
@@ -512,16 +515,34 @@ bool MMFeatureExtractor::append_animation(const Ref<MotionMatchingDatabase> &p_d
 	if (!_prepare(p_skeleton)) {
 		return false;
 	}
+	_resolve_pose_bones(p_skeleton);
 
-	if (_sampler.is_null()) {
-		_sampler.instantiate();
+	ClipExtractionResult result;
+	if (!_extract_clip(p_skeleton, p_animation, p_name, p_library, p_category, p_tags, result)) {
+
+if (!_extract_clip(p_skeleton, p_animation, p_name, p_library, p_category, p_tags, result)) {
+		return false;
 	}
-	if (!_sampler->bind(p_skeleton, p_animation, _profile->get_bone_name(MM_BONE_ROOT),
+	_commit_clip_result(p_database, result);
+	return true;
+}
+
+// Everything append_animation() used to do after resolving the pose bones,
+// minus the final merge into p_database -- this is the part build_database()
+// runs from worker threads. Every read here (_schema, _profile,
+// _pose_bone_indices, _foot_slots, _hip_height, the tuning ratios, ...) is
+// fixed for the whole build by the time this is called, so concurrent calls
+// never race with each other; the only mutable state is the sampler and the
+// result, both local to this one call.
+bool MMFeatureExtractor::_extract_clip(Skeleton3D *p_skeleton, const Ref<Animation> &p_animation,
+		const String &p_name, const String &p_library, int p_category, int p_tags,
+		ClipExtractionResult &r_result) {
+	Ref<MMPoseSampler> sampler;
+	sampler.instantiate();
+	if (!sampler->bind(p_skeleton, p_animation, _profile->get_bone_name(MM_BONE_ROOT),
 				_profile->get_bone_name(MM_BONE_PELVIS))) {
 		return false;
 	}
-
-	_resolve_pose_bones(p_skeleton);
 
 	const PackedStringArray bone_names = _schema->get_pose_bones();
 	const double length = p_animation->get_length();
@@ -550,36 +571,23 @@ bool MMFeatureExtractor::append_animation(const Ref<MotionMatchingDatabase> &p_d
 
 	for (int f = 0; f < frame_count; f++) {
 		const double time = MIN((double)f * step, length);
-		_sampler->sample(time);
-		root_track.write[f] = _sampler->get_root_transform();
+		sampler->sample(time);
+		root_track.write[f] = sampler->get_root_transform();
 		for (int b = 0; b < bone_count; b++) {
 			const int bone = _pose_bone_indices[b];
 			bone_track.write[f * bone_count + b] =
-					bone >= 0 ? _sampler->get_model_transform(bone).origin : Vector3();
+					bone >= 0 ? sampler->get_model_transform(bone).origin : Vector3();
 		}
 	}
 
-	// Pass B: build the feature vectors.
+	// Pass B: build the feature vectors, entirely into this result's own
+	// arrays -- nothing here touches the shared database.
 	const int dimension = _schema->get_dimension();
 	const int trajectory_points = _schema->get_trajectory_point_count();
 	const PackedFloat32Array trajectory_times = _schema->get_trajectory_times();
 
-	PackedFloat32Array features = p_database->get_features();
-	PackedInt32Array frame_animation = p_database->get_frame_animation();
-	PackedFloat32Array frame_time = p_database->get_frame_time();
-	PackedFloat32Array frame_normalized = p_database->get_frame_normalized_time();
-	PackedVector3Array frame_root_velocity = p_database->get_frame_root_velocity();
-	PackedFloat32Array frame_angular = p_database->get_frame_angular_velocity();
-	PackedFloat32Array frame_speed = p_database->get_frame_speed();
-	PackedInt32Array frame_tags = p_database->get_frame_tags();
-	PackedByteArray frame_category = p_database->get_frame_category();
-	PackedByteArray frame_contacts = p_database->get_frame_contacts();
-
-	const int animation_id = p_database->get_animation_count();
-	const int frame_start = frame_animation.size();
-	const int64_t base = features.size();
-	features.resize(base + (int64_t)frame_count * dimension);
-	float *feature_ptr = features.ptrw() + base;
+	r_result.features.resize((int64_t)frame_count * dimension);
+	float *feature_ptr = r_result.features.ptrw();
 
 	const float contact_speed = _foot_contact_speed_ratio * _hip_height;
 	const float contact_height = _foot_contact_height_ratio * _hip_height;
@@ -728,16 +736,59 @@ bool MMFeatureExtractor::append_animation(const Ref<MotionMatchingDatabase> &p_d
 		speed_min = MIN(speed_min, planar_speed);
 		speed_max = MAX(speed_max, planar_speed);
 
-		frame_animation.push_back(animation_id);
-		frame_time.push_back((float)((double)f * step));
-		frame_normalized.push_back(length > 0.0 ? (float)((double)f * step / length) : 0.0f);
-		frame_root_velocity.push_back(root_velocity);
-		frame_angular.push_back(angular_velocity);
-		frame_speed.push_back(planar_speed);
-		frame_tags.push_back(p_tags);
-		frame_category.push_back((uint8_t)p_category);
-		frame_contacts.push_back(contacts);
+		r_result.frame_time.push_back((float)((double)f * step));
+		r_result.frame_normalized.push_back(length > 0.0 ? (float)((double)f * step / length) : 0.0f);
+		r_result.frame_root_velocity.push_back(root_velocity);
+		r_result.frame_angular.push_back(angular_velocity);
+		r_result.frame_speed.push_back(planar_speed);
+		r_result.frame_tags.push_back(p_tags);
+		r_result.frame_category.push_back((uint8_t)p_category);
+		r_result.frame_contacts.push_back(contacts);
 	}
+
+	r_result.name = p_name;
+	r_result.library = p_library;
+	r_result.category = p_category;
+	r_result.tags = p_tags;
+	r_result.length = (float)length;
+	r_result.loop = loop;
+	r_result.frame_count = frame_count;
+	r_result.speed_min = speed_min == MM_INFINITY ? 0.0f : speed_min;
+	r_result.speed_max = speed_max;
+	return true;
+}
+
+// The one step that actually mutates the shared database, so build_database()
+// only ever calls this after its worker threads (which call _extract_clip()
+// above) have all joined.
+void MMFeatureExtractor::_commit_clip_result(const Ref<MotionMatchingDatabase> &p_database,
+		const ClipExtractionResult &p_result) {
+	PackedFloat32Array features = p_database->get_features();
+	PackedInt32Array frame_animation = p_database->get_frame_animation();
+	PackedFloat32Array frame_time = p_database->get_frame_time();
+	PackedFloat32Array frame_normalized = p_database->get_frame_normalized_time();
+	PackedVector3Array frame_root_velocity = p_database->get_frame_root_velocity();
+	PackedFloat32Array frame_angular = p_database->get_frame_angular_velocity();
+	PackedFloat32Array frame_speed = p_database->get_frame_speed();
+	PackedInt32Array frame_tags = p_database->get_frame_tags();
+	PackedByteArray frame_category = p_database->get_frame_category();
+	PackedByteArray frame_contacts = p_database->get_frame_contacts();
+
+	const int animation_id = p_database->get_animation_count();
+	const int frame_start = frame_animation.size();
+
+	features.append_array(p_result.features);
+	for (int f = 0; f < p_result.frame_count; f++) {
+		frame_animation.push_back(animation_id);
+	}
+	frame_time.append_array(p_result.frame_time);
+	frame_normalized.append_array(p_result.frame_normalized);
+	frame_root_velocity.append_array(p_result.frame_root_velocity);
+	frame_angular.append_array(p_result.frame_angular);
+	frame_speed.append_array(p_result.frame_speed);
+	frame_tags.append_array(p_result.frame_tags);
+	frame_category.append_array(p_result.frame_category);
+	frame_contacts.append_array(p_result.frame_contacts);
 
 	p_database->set_features(features);
 	p_database->set_frame_animation(frame_animation);
@@ -752,23 +803,20 @@ bool MMFeatureExtractor::append_animation(const Ref<MotionMatchingDatabase> &p_d
 
 	Ref<MMAnimationEntry> entry;
 	entry.instantiate();
-	entry->set_animation_name(p_name);
-	entry->set_library_name(p_library);
-	entry->set_category(p_category);
-	entry->set_tags(p_tags);
-	entry->set_length((float)length);
-	entry->set_loop(loop);
+	entry->set_animation_name(p_result.name);
+	entry->set_library_name(p_result.library);
+	entry->set_category(p_result.category);
+	entry->set_tags(p_result.tags);
+	entry->set_length(p_result.length);
+	entry->set_loop(p_result.loop);
 	entry->set_frame_start(frame_start);
-	entry->set_frame_count(frame_count);
-	entry->set_speed_min(speed_min == MM_INFINITY ? 0.0f : speed_min);
-	entry->set_speed_max(speed_max);
+	entry->set_frame_count(p_result.frame_count);
+	entry->set_speed_min(p_result.speed_min);
+	entry->set_speed_max(p_result.speed_max);
 
 	TypedArray<MMAnimationEntry> animations = p_database->get_animations();
 	animations.push_back(entry);
 	p_database->set_animations(animations);
-
-	_sampler->unbind();
-	return true;
 }
 
 Ref<MotionMatchingDatabase> MMFeatureExtractor::build_database(Skeleton3D *p_skeleton,
@@ -778,6 +826,11 @@ Ref<MotionMatchingDatabase> MMFeatureExtractor::build_database(Skeleton3D *p_ske
 	if (!_prepare(p_skeleton)) {
 		return Ref<MotionMatchingDatabase>();
 	}
+	// Resolved once here instead of once per clip inside append_animation():
+	// it depends only on p_skeleton and the schema's pose bone list, neither
+	// of which changes for the rest of this call, so every worker thread
+	// below can safely read it without re-resolving or racing on it.
+	_resolve_pose_bones(p_skeleton);
 
 	Ref<MotionMatchingDatabase> database;
 	database.instantiate();
@@ -787,34 +840,93 @@ Ref<MotionMatchingDatabase> MMFeatureExtractor::build_database(Skeleton3D *p_ske
 	const PackedStringArray names = p_library->get_animation_list();
 	const int total = names.size();
 
+	// Every clip's Animation resource is resolved here, single threaded,
+	// since AnimationLibrary lookup by name is the one part of this setup
+	// that isn't obviously safe to call from several threads at once.
+	std::vector<Ref<Animation>> animations(total);
 	for (int i = 0; i < total; i++) {
-		const String name = names[i];
+		animations[i] = p_library->get_animation(names[i]);
+	}
+
+	std::vector<ClipExtractionResult> results(total);
+	// uint8_t, not bool: std::vector<bool> is bit-packed, so two threads
+	// writing different logical indices could still race on the same
+	// underlying byte. Every element here gets its own byte instead.
+	std::vector<uint8_t> valid(total, 0);
+
+	// Work-stealing over a shared index rather than a fixed static split:
+	// clip lengths vary a lot, so a thread that happens to draw several long
+	// clips in a row would otherwise sit well past the others finishing.
+	std::atomic<int> next_index(0);
+	const int worker_count = total > 0
+			? CLAMP((int)std::thread::hardware_concurrency(), 1, MIN(total, 16))
+			: 0;
+
+	_progress_label = vformat("extracting (%d threads)", worker_count);
+
+	auto worker = [&]() {
+		int index;
+		while ((index = next_index.fetch_add(1)) < total) {
+			const Ref<Animation> &animation = animations[index];
+			if (animation.is_null()) {
+				continue;
+			}
+			const String &name = names[index];
+
+			int tags = 0;
+			int category = MM_CATEGORY_LOCOMOTION;
+
+			// p_clip_settings and _analyzer are only ever read from here,
+			// never written, for the whole extraction phase -- the same
+			// "immutable once built, read without a lock" reasoning
+			// MMSearchWorker already relies on for its search tree.
+			if (p_clip_settings.has(name)) {
+				const Dictionary settings = p_clip_settings[name];
+				tags = settings.get("tags", 0);
+				category = settings.has("category") ? (int)settings["category"]
+													: MMClipAnalyzer::category_for_tags(tags);
+			}
+
+			// Anything the caller did not classify gets classified from its
+			// motion. analyze_animation() uses a sampler local to its own
+			// call, so this is as safe to run concurrently as the
+			// extraction below.
+			if (tags == 0) {
+				const Dictionary stats = analyze_animation(p_skeleton, animation);
+				tags = _analyzer->classify_dictionary(stats, name);
+				category = MMClipAnalyzer::category_for_tags(tags);
+			}
+
+			valid[index] = _extract_clip(p_skeleton, animation, name, String(), category, tags,
+					results[index]);
+		}
+	};
+
+	if (worker_count <= 1) {
+		// Small library, or hardware_concurrency() couldn't tell -- run
+		// inline rather than pay thread startup cost for one worker.
+		worker();
+	} else {
+		std::vector<std::thread> workers;
+		workers.reserve(worker_count);
+		for (int i = 0; i < worker_count; i++) {
+			workers.emplace_back(worker);
+		}
+		for (std::thread &w : workers) {
+			w.join();
+		}
+	}
+
+	// The merge is single threaded and runs in original clip order, which is
+	// what keeps a rebuilt database byte-identical in layout to one built
+	// before this change -- only the (much more expensive) extraction above
+	// actually ran in parallel.
+	_progress_label = "merging";
+	for (int i = 0; i < total; i++) {
 		_progress = total > 0 ? (float)i / (float)total : 1.0f;
-		_progress_label = name;
-
-		Ref<Animation> animation = p_library->get_animation(name);
-		if (animation.is_null()) {
-			continue;
+		if (valid[i]) {
+			_commit_clip_result(database, results[i]);
 		}
-
-		int tags = 0;
-		int category = MM_CATEGORY_LOCOMOTION;
-
-		if (p_clip_settings.has(name)) {
-			const Dictionary settings = p_clip_settings[name];
-			tags = settings.get("tags", 0);
-			category = settings.has("category") ? (int)settings["category"]
-												: MMClipAnalyzer::category_for_tags(tags);
-		}
-
-		// Anything the caller did not classify gets classified from its motion.
-		if (tags == 0) {
-			const Dictionary stats = analyze_animation(p_skeleton, animation);
-			tags = _analyzer->classify_dictionary(stats, name);
-			category = MMClipAnalyzer::category_for_tags(tags);
-		}
-
-		append_animation(database, p_skeleton, animation, name, String(), category, tags);
 	}
 
 	_progress = 1.0f;
