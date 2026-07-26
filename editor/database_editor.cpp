@@ -92,6 +92,13 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_sample_rate->set_value(30);
 	mm_add_row(this, "Sample rate (Hz)", _sample_rate);
 
+	_root_yaw_offset = memnew(SpinBox);
+	_root_yaw_offset->set_min(-180);
+	_root_yaw_offset->set_max(180);
+	_root_yaw_offset->set_step(1);
+	_root_yaw_offset->set_value(0);
+	mm_add_row(this, "Root yaw offset (degrees)", _root_yaw_offset);
+
 	HBoxContainer *buttons = memnew(HBoxContainer);
 	_scan_button = memnew(Button);
 	_scan_button->set_text("Scan library");
@@ -346,6 +353,7 @@ void MMDatabaseEditor::_on_build_pressed() {
 	extractor.instantiate();
 	extractor->set_schema(_schema);
 	extractor->set_sample_rate((float)_sample_rate->get_value());
+	extractor->set_root_yaw_offset_degrees((float)_root_yaw_offset->get_value());
 
 	if (!_auto_detect_profile->is_pressed()) {
 		extractor->set_auto_detect_profile(false);
