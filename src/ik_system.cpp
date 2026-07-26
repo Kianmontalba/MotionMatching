@@ -277,7 +277,7 @@ void MMFootIKModifier::_process_modification() {
 
 	const Transform3D skeleton_transform = skeleton->get_global_transform();
 	const Vector3 up = Vector3(0, 1, 0);
-	const float alpha = 1.0f - Math::exp(-0.6931472f * 0.016f / MAX(_smoothing_halflife, 0.0001f));
+	const float alpha = 1.0f - Math::exp(-0.6931472f * get_process_delta_time() / MAX(_smoothing_halflife, 0.0001f));
 
 	float targets[2] = { 0.0f, 0.0f };
 	Vector3 world_targets[2];
@@ -365,7 +365,7 @@ void MMFootIKModifier::_process_modification() {
 		// The knee points where the foot points.
 		const Transform3D knee_pose = skeleton->get_bone_global_pose(lower);
 		const Vector3 pole = knee_pose.origin + skeleton->get_bone_global_pose(upper).basis.xform(
-															 Vector3(0, 0, -1)) *
+																 Vector3(0, 0, -1)) *
 													  1.0f;
 
 		MMIKSolver::solve_two_bone(skeleton, upper, lower, foot, local_target, pole, influence);
@@ -442,7 +442,7 @@ void MMAimIKModifier::_process_modification() {
 		return;
 	}
 
-	const float alpha = 1.0f - Math::exp(-0.6931472f * 0.016f / MAX(_smoothing_halflife, 0.0001f));
+	const float alpha = 1.0f - Math::exp(-0.6931472f * get_process_delta_time() / MAX(_smoothing_halflife, 0.0001f));
 	_current_target = _current_target.lerp(_target, alpha);
 
 	const Transform3D inverse_skeleton = skeleton->get_global_transform().affine_inverse();
