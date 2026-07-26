@@ -72,6 +72,19 @@ private:
 	float _pelvis_adjust_strength = 1.0f;
 	float _smoothing_halflife = 0.08f;
 	bool _adapt_rotation = true;
+	// How far the foot is allowed to tilt off flat to match the ground
+	// normal, and how softly it eases there. Kept separate from
+	// _smoothing_halflife (which times the foot's vertical offset) because
+	// a natural-feeling ankle roll and a natural-feeling step height rarely
+	// want the same timing.
+	float _max_foot_rotation_angle = 0.6109f; // radians, roughly 35 degrees
+	float _rotation_smoothing_halflife = 0.10f;
+	// Static calibration, applied on top of the smoothed ground alignment
+	// every tick: some rigs' foot bone axes don't sit flush with the mesh's
+	// own sole/flat orientation, so the adaptation looks tilted even when
+	// it's mathematically correct. This corrects for that per rig, once,
+	// rather than needing the mesh or the rest pose changed.
+	Vector3 _foot_rotation_offset_degrees = Vector3(0, 0, 0);
 	float _max_slope_angle = 0.87f; // radians, roughly 50 degrees
 	uint32_t _collision_mask = 1;
 
@@ -82,6 +95,12 @@ private:
 	bool _right_locked = false;
 	Vector3 _left_lock_position;
 	Vector3 _right_lock_position;
+	// Smoothed ground-alignment rotation per foot, eased toward the raw
+	// (clamped) target each tick instead of snapping straight to it -- this
+	// is what keeps a foot planting on a slanted or noisy surface from
+	// twisting there instantly.
+	Quaternion _left_foot_align;
+	Quaternion _right_foot_align;
 
 	int _indices[7] = { -1, -1, -1, -1, -1, -1, -1 };
 	bool _indices_dirty = true;
@@ -92,6 +111,7 @@ private:
 
 protected:
 	static void _bind_methods();
+	void _validate_property(PropertyInfo &p_property) const;
 
 public:
 	MM_ACCESSORS(String, left_upper_leg)
@@ -108,6 +128,9 @@ public:
 	MM_ACCESSORS(float, pelvis_adjust_strength)
 	MM_ACCESSORS(float, smoothing_halflife)
 	MM_ACCESSORS(bool, adapt_rotation)
+	MM_ACCESSORS(float, max_foot_rotation_angle)
+	MM_ACCESSORS(float, rotation_smoothing_halflife)
+	MM_ACCESSORS(Vector3, foot_rotation_offset_degrees)
 	MM_ACCESSORS(float, max_slope_angle)
 
 	void set_collision_mask(int p_mask) { _collision_mask = (uint32_t)p_mask; }
