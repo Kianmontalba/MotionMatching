@@ -23,7 +23,8 @@ class MMDebugDraw : public MeshInstance3D {
 
 private:
 	NodePath _controller_path;
-	MotionMatchingController *_controller = nullptr;
+	mutable MotionMatchingController *_controller = nullptr;
+	ObjectID _controller_id;
 	Ref<ImmediateMesh> _mesh;
 	Ref<StandardMaterial3D> _material;
 
@@ -37,6 +38,12 @@ private:
 
 	void _draw_line(const Vector3 &p_from, const Vector3 &p_to, const Color &p_color);
 	void _draw_marker(const Vector3 &p_position, float p_size, const Color &p_color);
+	// The controller registers itself once at _ready(); re-checking through
+	// its ObjectID on every use (same pattern as
+	// AnimationNodeMotionMatching::_resolve_controller()) means a controller
+	// freed later in the scene's life turns this back into a plain null
+	// instead of leaving a dangling MotionMatchingController* behind.
+	MotionMatchingController *_resolve_controller() const;
 
 protected:
 	static void _bind_methods();
