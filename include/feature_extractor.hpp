@@ -14,6 +14,8 @@
 #include <godot_cpp/templates/hash_map.hpp>
 #include <godot_cpp/templates/vector.hpp>
 
+#include <thread>
+
 namespace godot {
 
 // ---------------------------------------------------------------------------
@@ -108,12 +110,62 @@ private:
 	float _progress = 0.0f;
 	float _hip_height = 1.0f;
 
-	Ref<MMPoseSampler> _sampler;
 	Vector<int> _pose_bone_indices;
 	Vector<int> _foot_slots; // Indices into the schema's pose bone list.
 
+	// One clip's worth of computed data, held entirely outside any shared
+	// container until it is committed. This is what lets build_database()
+	// compute several clips' features on different threads at once: each
+	// worker owns one of these exclusively (writes to a PackedArray inside
+	// it are never observed by another thread while that's happening), and
+	// nothing is written into the shared MotionMatchingDatabase until the
+	// single-threaded commit step below.
+	struct ClipExtractionResult {
+		PackedFloat32Array features;
+		PackedFloat32Array frame_time;
+		PackedFloat32Array frame_normalized;
+		PackedVector3Array frame_root_velocity;
+		PackedFloat32Array frame_angular;
+		PackedFloat32Array frame_speed;
+		PackedInt32Array frame_tags;
+		PackedByteArray frame_category;
+		PackedByteArray frame_contacts;
+
+		String name;
+		String library;
+		int category = MM_CATEGORY_LOCOMOTION;
+		int tags = 0;
+		float length = 0.0f;
+		bool loop = true;
+		int frame_count = 0;
+		float speed_min = 0.0f;
+		float speed_max = 0.0f;
+	};
+
 	bool _prepare(Skeleton3D *p_skeleton);
 	void _resolve_pose_bones(Skeleton3D *p_skeleton);
+
+	// The actual per-clip sampling and feature math, factored out of
+	// append_animation() so build_database() can run it from worker
+	// threads. Uses a sampler local to this one call (never the old shared
+	// _sampler member, which this refactor removes) and only reads
+	// _schema/_profile/_pose_bone_indices/_foot_slots/_hip_height and the
+	// other tuning members below -- all of which are fixed for the whole
+	// build by the time this runs (set once, up front, by _prepare() /
+	// _resolve_pose_bones(), never touched again until the next separate
+	// build call), so concurrent calls to this method never race with each
+	// other. A subclass overriding _extract_extra() must keep that override
+	// itself free of shared mutable state for the same reason.
+	bool _extract_clip(Skeleton3D *p_skeleton, const Ref<Animation> &p_animation, const String &p_name,
+			const String &p_library, int p_category, int p_tags, ClipExtractionResult &r_result);
+
+	// Appends one already-computed clip into the shared database: assigns
+	// its frame_start/animation_id from the database's current size and
+	// extends every packed array. Always called single threaded (from
+	// append_animation() directly, or from build_database()'s merge pass
+	// after its worker threads have joined) since this is the one step that
+	// actually mutates shared, growing state.
+	void _commit_clip_result(const Ref<MotionMatchingDatabase> &p_database, const ClipExtractionResult &p_result);
 
 protected:
 	static void _bind_methods();
