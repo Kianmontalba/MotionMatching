@@ -57,11 +57,6 @@ private:
 	float _blend_time = 0.15f;
 	float _minimum_blend_time = 0.06f;
 	bool _allow_same_clip_jump = false;
-	// Clamp for the velocity-based playback speed system: how far a clip's
-	// own playback rate is allowed to stretch or compress to match the
-	// character's actual speed against the speed the clip was recorded at.
-	float _min_playback_speed = 0.5f;
-	float _max_playback_speed = 1.6f;
 
 	// Trajectory settings.
 	float _trajectory_halflife_position = 0.12f;
@@ -97,8 +92,6 @@ public:
 	MM_ACCESSORS(float, blend_time)
 	MM_ACCESSORS(float, minimum_blend_time)
 	MM_ACCESSORS(bool, allow_same_clip_jump)
-	MM_ACCESSORS(float, min_playback_speed)
-	MM_ACCESSORS(float, max_playback_speed)
 	MM_ACCESSORS(float, trajectory_halflife_position)
 	MM_ACCESSORS(float, trajectory_halflife_direction)
 	MM_ACCESSORS(float, max_speed)
@@ -215,12 +208,6 @@ private:
 	float _blend_weight = 1.0f;
 	float _blend_speed = 0.0f;
 	bool _seek_request = false;
-	// Velocity-based playback speed: current_speed / the reference speed the
-	// current clip's frame was actually recorded at (get_frame_speed_value()),
-	// clamped to [min_playback_speed, max_playback_speed]. Recomputed every
-	// _advance_playback() call; kept around only so it can be read back for
-	// debugging (see get_playback_speed()).
-	float _playback_speed = 1.0f;
 
 	float _time_since_search = 0.0f;
 	float _time_in_clip = 0.0f;
@@ -310,7 +297,6 @@ public:
 	StringName get_previous_clip() const { return _previous_clip; }
 	double get_previous_time() const { return _previous_time; }
 	float get_blend_weight() const { return _blend_weight; }
-	float get_playback_speed() const { return _playback_speed; }
 	bool take_seek_request();
 
 	int get_current_frame() const { return _current_frame; }
