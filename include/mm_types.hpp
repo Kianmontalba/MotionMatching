@@ -85,6 +85,17 @@ static const uint32_t MM_TAG_MASK_AIRBORNE = MM_TAG_JUMP | MM_TAG_FALL | MM_TAG_
 static const uint32_t MM_TAG_MASK_TRAVERSAL =
 		MM_TAG_VAULT | MM_TAG_MANTLE | MM_TAG_CLIMB | MM_TAG_SLIDE | MM_TAG_ROLL;
 
+// A clip carrying any of these tags represents a single discrete motion with
+// a clear beginning and end (a start-up, a stop, a turn-in-place, a jump
+// lifecycle, a traversal move, an attack, ...) rather than a cycle meant to
+// repeat. Used to decide whether a baked clip should loop at runtime, purely
+// from its tags -- so the rule holds regardless of which animation library,
+// naming convention, or rig the tags were assigned to.
+static const uint32_t MM_TAG_MASK_ONE_SHOT =
+		MM_TAG_START | MM_TAG_STOP | MM_TAG_TURN | MM_TAG_PIVOT |
+		MM_TAG_MASK_AIRBORNE | MM_TAG_MASK_TRAVERSAL |
+		MM_TAG_ATTACK | MM_TAG_RELOAD | MM_TAG_HIT;
+
 // ---------------------------------------------------------------------------
 // Feature groups. Each dimension of a feature vector maps to one group, and
 // each group carries its own normalization scale and cost weight.
