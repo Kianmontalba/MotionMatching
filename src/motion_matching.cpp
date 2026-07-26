@@ -730,14 +730,13 @@ void MotionMatchingController::_apply_match(const MMMatchResult &p_match) {
 		// cost like any other. This line reports what was actually picked
 		// (name, category, tags) so a transition clip either shows up here by
 		// name or it doesn't; there is no separate flag to trust instead.
-		        print_line(vformat(
+		print_line(vformat(
 				"[MotionMatching] Current: %s (category %d, tags %d, loop %s) | Previous: %s | "
-				"Velocity: %s (%.2f m/s) | Desired velocity: %s | Playback speed: %.2f | "
-				"State: %s",
+				"Velocity: %s (%.2f m/s) | Desired velocity: %s | State: %s",
 				entry->get_qualified_name(), entry->get_category(), entry->get_tags(),
 				entry->get_loop() ? "true" : "false",
 				previous_entry.is_valid() ? previous_entry->get_qualified_name() : StringName("(none)"),
-				_velocity, Vector2(_velocity.x, _velocity.z).length(), _desired_velocity, _playback_speed,
+				_velocity, Vector2(_velocity.x, _velocity.z).length(), _desired_velocity,
 				!_grounded ? "airborne" : (_landing_timer > 0.0f ? "landing" : "grounded")));
 	}
 
@@ -749,30 +748,7 @@ void MotionMatchingController::_advance_playback(double p_delta) {
 		return;
 	}
 
-	// Velocity-based playback speed: current_speed / the speed this exact
-	// baked frame was recorded moving at. A clip authored at 3 m/s that the
-	// character is currently covering at 1.5 m/s plays back at half rate, so
-	// foot placement keeps matching the ground speed instead of sliding.
-	// This reads get_frame_speed_value(), which every clip already has from
-	// extraction (measured root motion, not metadata), so it works the same
-	// way regardless of which animation library the clip came from.
-	const float min_playback_speed = _resource.is_valid() ? _resource->get_min_playback_speed() : 0.5f;
-	const float max_playback_speed = _resource.is_valid() ? _resource->get_max_playback_speed() : 1.6f;
-
-	_playback_speed = 1.0f;
-	if (_database.is_valid() && _current_frame >= 0 && _current_frame < _database->get_frame_count()) {
-		const float reference_speed = _database->get_frame_speed_value(_current_frame);
-		// A near-static reference (an idle pose, an aim-offset pose, ...) has
-		// no meaningful ground speed to scale toward -- dividing by it would
-		// either blow up or produce a meaningless speed-up, so those clips
-		// simply play at their own authored rate.
-		if (reference_speed > 0.05f) {
-			const float current_speed = Vector2(_velocity.x, _velocity.z).length();
-			_playback_speed = CLAMP(current_speed / reference_speed, min_playback_speed, max_playback_speed);
-		}
-	}
-
-	_current_time += p_delta * (double)_playback_speed;
+	_current_time += p_delta;
 	_previous_time += p_delta;
 
 	if (_blend_weight < 1.0f) {
@@ -937,7 +913,6 @@ void MotionMatchingController::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_previous_clip"), &MotionMatchingController::get_previous_clip);
 	ClassDB::bind_method(D_METHOD("get_previous_time"), &MotionMatchingController::get_previous_time);
 	ClassDB::bind_method(D_METHOD("get_blend_weight"), &MotionMatchingController::get_blend_weight);
-	ClassDB::bind_method(D_METHOD("get_playback_speed"), &MotionMatchingController::get_playback_speed);
 	ClassDB::bind_method(D_METHOD("get_current_frame"), &MotionMatchingController::get_current_frame);
 	ClassDB::bind_method(D_METHOD("get_current_animation_id"),
 			&MotionMatchingController::get_current_animation_id);
