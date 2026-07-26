@@ -20,14 +20,24 @@ void MMDebugDraw::set_controller_path(const NodePath &p_path) {
 	_controller_path = p_path;
 	if (is_inside_tree()) {
 		_controller = Object::cast_to<MotionMatchingController>(get_node_or_null(p_path));
+		_controller_id = _controller != nullptr ? _controller->get_instance_id() : ObjectID();
 	}
 }
 
 void MMDebugDraw::_ready() {
 	if (!_controller_path.is_empty()) {
 		_controller = Object::cast_to<MotionMatchingController>(get_node_or_null(_controller_path));
+		_controller_id = _controller != nullptr ? _controller->get_instance_id() : ObjectID();
 	}
 	set_process(!Engine::get_singleton()->is_editor_hint());
+}
+
+MotionMatchingController *MMDebugDraw::_resolve_controller() const {
+	if (_controller != nullptr && ObjectDB::get_instance(_controller_id) != nullptr) {
+		return _controller;
+	}
+	_controller = nullptr;
+	return nullptr;
 }
 
 void MMDebugDraw::_draw_line(const Vector3 &p_from, const Vector3 &p_to, const Color &p_color) {
@@ -45,11 +55,12 @@ void MMDebugDraw::_draw_marker(const Vector3 &p_position, float p_size, const Co
 
 void MMDebugDraw::_process(double p_delta) {
 	_mesh->clear_surfaces();
-	if (_controller == nullptr || !_draw_trajectory) {
+	MotionMatchingController *controller = _resolve_controller();
+	if (controller == nullptr || !_draw_trajectory) {
 		return;
 	}
 
-	const PackedVector3Array points = _controller->get_debug_trajectory();
+	const PackedVector3Array points = controller->get_debug_trajectory();
 	if (points.size() < 2) {
 		return;
 	}
@@ -60,7 +71,7 @@ void MMDebugDraw::_process(double p_delta) {
 	// back into local space or the line will double up the character's motion.
 	const Transform3D inverse = get_global_transform().affine_inverse();
 
-	Ref<MMTrajectory> trajectory = _controller->get_trajectory();
+	Ref<MMTrajectory> trajectory = controller->get_trajectory();
 	const int future_count = trajectory.is_valid() ? trajectory->get_sample_count() : 0;
 	const int split = MAX(0, points.size() - future_count);
 
