@@ -730,7 +730,7 @@ void MotionMatchingController::_apply_match(const MMMatchResult &p_match) {
 		// cost like any other. This line reports what was actually picked
 		// (name, category, tags) so a transition clip either shows up here by
 		// name or it doesn't; there is no separate flag to trust instead.
-		UtilityFunctions::print_line(vformat(
+		        print_line(vformat(
 				"[MotionMatching] Current: %s (category %d, tags %d, loop %s) | Previous: %s | "
 				"Velocity: %s (%.2f m/s) | Desired velocity: %s | Playback speed: %.2f | "
 				"State: %s",
