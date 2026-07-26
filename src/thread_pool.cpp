@@ -51,6 +51,8 @@ uint64_t MMSearchWorker::submit(const float *p_query, int p_dimension, const MMS
 	if (!_running.load()) {
 		return 0;
 	}
+	ERR_FAIL_COND_V_MSG(p_query == nullptr && p_dimension > 0, 0,
+			"MMSearchWorker::submit(): query pointer is null but dimension is nonzero.");
 
 	uint64_t id = 0;
 	{
