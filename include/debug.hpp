@@ -32,12 +32,26 @@ private:
 	bool _draw_matched_trajectory = true;
 	bool _draw_facing = true;
 	float _marker_size = 0.06f;
+	// How far above the raw trajectory points to draw everything. The raw
+	// points sit at the character's root height, which on most rigs is at
+	// or near the ground -- without this lift the whole debug draw reads as
+	// buried in the floor even with depth testing disabled.
+	float _floor_offset = 0.05f;
+	// Length of the small forward-direction arrow drawn off every circle.
+	float _forward_arrow_length = 0.18f;
 	Color _history_color = Color(0.35f, 0.55f, 1.0f);
 	Color _future_color = Color(0.2f, 1.0f, 0.5f);
 	Color _matched_color = Color(1.0f, 0.65f, 0.15f);
 
 	void _draw_line(const Vector3 &p_from, const Vector3 &p_to, const Color &p_color);
-	void _draw_marker(const Vector3 &p_position, float p_size, const Color &p_color);
+	// Flat ring in the XZ plane -- this is the "O" in the O----> style every
+	// AAA motion matching debug view uses per sample point.
+	void _draw_circle(const Vector3 &p_center, float p_radius, const Color &p_color);
+	// The "---->" half: a line with a small two-stroke arrowhead, used both
+	// for the per-point forward arrow and (scaled differently) anywhere else
+	// a direction needs to read clearly from a top-down or side angle.
+	void _draw_arrow(const Vector3 &p_from, const Vector3 &p_direction, float p_length,
+			const Color &p_color);
 	// The controller registers itself once at _ready(); re-checking through
 	// its ObjectID on every use (same pattern as
 	// AnimationNodeMotionMatching::_resolve_controller()) means a controller
@@ -58,6 +72,8 @@ public:
 	MM_ACCESSORS(bool, draw_matched_trajectory)
 	MM_ACCESSORS(bool, draw_facing)
 	MM_ACCESSORS(float, marker_size)
+	MM_ACCESSORS(float, floor_offset)
+	MM_ACCESSORS(float, forward_arrow_length)
 	MM_ACCESSORS(Color, history_color)
 	MM_ACCESSORS(Color, future_color)
 	MM_ACCESSORS(Color, matched_color)
