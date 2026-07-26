@@ -249,6 +249,42 @@ void MMFootIKModifier::_resolve_indices(Skeleton3D *p_skeleton) {
 	}
 }
 
+// Turns the seven plain bone-name fields into a searchable dropdown of the
+// actual skeleton's bones once one is resolvable, instead of requiring the
+// name to be typed by hand. PROPERTY_HINT_ENUM_SUGGESTION (not
+// PROPERTY_HINT_ENUM) is deliberate: it offers the skeleton's bone names as
+// suggestions but still accepts any text, so a name that doesn't match any
+// bone yet (the modifier added before the skeleton is wired up, a bone
+// renamed later, ...) doesn't get silently clobbered.
+void MMFootIKModifier::_validate_property(PropertyInfo &p_property) const {
+	static const StringName bone_property_names[] = {
+		StringName("left_upper_leg"), StringName("left_lower_leg"), StringName("left_foot"),
+		StringName("right_upper_leg"), StringName("right_lower_leg"), StringName("right_foot"),
+		StringName("pelvis")
+	};
+	bool is_bone_property = false;
+	for (const StringName &name : bone_property_names) {
+		if (p_property.name == name) {
+			is_bone_property = true;
+			break;
+		}
+	}
+	if (!is_bone_property) {
+		return;
+	}
+
+	// Only meaningful once this modifier is actually under a Skeleton3D --
+	// before that (freshly added, not yet reparented) the field just stays
+	// a plain text box, same as it always was.
+	Skeleton3D *skeleton = const_cast<MMFootIKModifier *>(this)->get_skeleton();
+	if (skeleton == nullptr) {
+		return;
+	}
+
+	p_property.hint = PROPERTY_HINT_ENUM_SUGGESTION;
+	p_property.hint_string = skeleton->get_concatenated_bone_names();
+}
+
 // Order matters. The pelvis is lowered first so both legs solve against a
 // reachable target; solving the legs first and then moving the pelvis would
 // undo the solve.
@@ -374,9 +410,35 @@ void MMFootIKModifier::_process_modification() {
 			const Transform3D foot_pose = skeleton->get_bone_global_pose(foot);
 			const Vector3 local_normal = inverse_skeleton.basis.xform(world_normals[side]).normalized();
 			const Vector3 foot_up = foot_pose.basis.xform(Vector3(0, 1, 0)).normalized();
-			const Quaternion align =
-					Quaternion(foot_up, local_normal).slerp(Quaternion(), 1.0f - influence);
-			MMIKSolver::set_bone_global_basis(skeleton, foot, Basis(align) * foot_pose.basis);
+
+			// Raw ground-normal alignment, clamped to a plausible ankle range
+			// so a steep or momentarily noisy ground reading cannot twist the
+			// foot further than an ankle actually could.
+			Quaternion target_align = Quaternion(foot_up, local_normal);
+			if (target_align.get_angle() > _max_foot_rotation_angle) {
+				target_align = Quaternion(target_align.get_axis(), _max_foot_rotation_angle);
+			}
+
+			// Eased toward that target instead of snapped to it, same
+			// exponential-halflife spring used for the pelvis/step offsets
+			// above -- this is what makes a foot settle onto a slanted rock
+			// softly, the way an ankle actually responds, instead of
+			// twisting into place the instant the ray hits.
+			const float rotation_alpha = 1.0f - Math::exp(-0.6931472f * get_process_delta_time() /
+					MAX(_rotation_smoothing_halflife, 0.0001f));
+			Quaternion &smoothed = side == 0 ? _left_foot_align : _right_foot_align;
+			smoothed = smoothed.slerp(target_align, rotation_alpha).normalized();
+
+			const Quaternion align = smoothed.slerp(Quaternion(), 1.0f - influence);
+			// Fixed per-rig calibration, applied in the foot's own local
+			// space on top of the (already soft) dynamic alignment above --
+			// this is what lines the sole up with the mesh when the bone's
+			// own axes don't already agree with it.
+			const Basis offset_basis =
+					Basis(Vector3(1, 0, 0), Math::deg_to_rad(_foot_rotation_offset_degrees.x)) *
+					Basis(Vector3(0, 1, 0), Math::deg_to_rad(_foot_rotation_offset_degrees.y)) *
+					Basis(Vector3(0, 0, 1), Math::deg_to_rad(_foot_rotation_offset_degrees.z));
+			MMIKSolver::set_bone_global_basis(skeleton, foot, Basis(align) * foot_pose.basis * offset_basis);
 		}
 	}
 }
@@ -396,6 +458,9 @@ void MMFootIKModifier::_bind_methods() {
 	MM_BIND_PROPERTY(MMFootIKModifier, Variant::FLOAT, pelvis_adjust_strength)
 	MM_BIND_PROPERTY(MMFootIKModifier, Variant::FLOAT, smoothing_halflife)
 	MM_BIND_PROPERTY(MMFootIKModifier, Variant::BOOL, adapt_rotation)
+	MM_BIND_PROPERTY(MMFootIKModifier, Variant::FLOAT, max_foot_rotation_angle)
+	MM_BIND_PROPERTY(MMFootIKModifier, Variant::FLOAT, rotation_smoothing_halflife)
+	MM_BIND_PROPERTY(MMFootIKModifier, Variant::VECTOR3, foot_rotation_offset_degrees)
 	MM_BIND_PROPERTY(MMFootIKModifier, Variant::FLOAT, max_slope_angle)
 	MM_BIND_PROPERTY(MMFootIKModifier, Variant::INT, collision_mask)
 
