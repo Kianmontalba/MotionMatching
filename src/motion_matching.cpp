@@ -73,7 +73,13 @@ void MotionMatchingController::_sync_from_resource() {
 		return;
 	}
 
-	_database = _resource->get_database();
+	// MotionMatchingResource now holds an MMExtraDatabase (boxes of named
+	// databases) instead of a single flat database directly. The controller
+	// itself is unchanged: it still runs against exactly one
+	// MotionMatchingDatabase, whichever one MMExtraDatabase currently marks
+	// active.
+	Ref<MMExtraDatabase> extra_database = _resource->get_database();
+	_database = extra_database.is_valid() ? extra_database->get_active_database() : Ref<MotionMatchingDatabase>();
 	_schema = _resource->get_schema();
 	if (_schema.is_null() && _database.is_valid()) {
 		_schema = _database->get_schema();
