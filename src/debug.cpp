@@ -174,7 +174,8 @@ void MMDebugDraw::_process(double p_delta) {
 			label->set_modulate(_label_color);
 			label->set_font_size(_label_font_size);
 			const float time = i < times.size() ? times[i] : 0.0f;
-			label->set_text(vformat("%d | %+.2fs", i, time));
+			const float speed = i < velocities.size() ? velocities[i].length() : 0.0f;
+			label->set_text(vformat("%d | %+.2fs | %.1f m/s", i, time, speed));
 		}
 	}
 
