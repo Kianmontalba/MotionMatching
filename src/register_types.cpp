@@ -72,6 +72,7 @@ void initialize_motion_matching_module(ModuleInitializationLevel p_level) {
 
 #ifdef TOOLS_ENABLED
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
+		GDREGISTER_CLASS(MMNodePathField);
 		GDREGISTER_CLASS(MMDatabaseEditor);
 		GDREGISTER_CLASS(MMFeatureEditor);
 		GDREGISTER_CLASS(MMTrajectoryEditor);
