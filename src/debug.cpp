@@ -120,6 +120,8 @@ void MMDebugDraw::_process(double p_delta) {
 																  : PackedVector3Array();
 	const PackedFloat32Array times = trajectory.is_valid() ? trajectory->get_debug_times()
 															 : PackedFloat32Array();
+	const PackedFloat32Array confidences = trajectory.is_valid() ? trajectory->get_debug_confidences()
+																	: PackedFloat32Array();
 
 	_mesh->surface_begin(Mesh::PRIMITIVE_LINES, _material);
 
@@ -136,8 +138,13 @@ void MMDebugDraw::_process(double p_delta) {
 		_draw_line(inverse.xform(points[i] + lift), inverse.xform(points[i + 1] + lift), color);
 	}
 
+	// One extra label slot beyond the trajectory points themselves, reserved
+	// for the traversal type name (drawn near the top point, if any).
+	const int traversal_label_index = points.size();
+	const int label_count = points.size() + (_draw_traversal_preview ? 1 : 0);
+
 	if (_draw_frame_labels) {
-		_ensure_label_pool(points.size());
+		_ensure_label_pool(label_count);
 	}
 
 	// Every sample gets a circle, and -- per the reference spec -- every
@@ -149,7 +156,13 @@ void MMDebugDraw::_process(double p_delta) {
 	// a strafe, a dodge, or a fast swing they visibly split apart, which is
 	// the whole point of drawing both.
 	for (int i = 0; i < points.size(); i++) {
-		const Color color = i < split ? _history_color : _future_color;
+		Color color = i < split ? _history_color : _future_color;
+		if (_draw_confidence_tier && i < confidences.size()) {
+			const float confidence = confidences[i];
+			color = confidence >= _confidence_green_threshold ? _confidence_green
+					: confidence >= _confidence_yellow_threshold ? _confidence_yellow
+																  : _confidence_red;
+		}
 		const Vector3 local_point = inverse.xform(points[i] + lift);
 		_draw_circle(local_point, _marker_size, color);
 
@@ -175,12 +188,60 @@ void MMDebugDraw::_process(double p_delta) {
 			label->set_font_size(_label_font_size);
 			const float time = i < times.size() ? times[i] : 0.0f;
 			const float speed = i < velocities.size() ? velocities[i].length() : 0.0f;
-			label->set_text(vformat("%d | %+.2fs | %.1f m/s", i, time, speed));
+			String text = vformat("%d | %+.2fs | %.1f m/s", i, time, speed);
+			if (i < confidences.size()) {
+				text += vformat("\n%.0f%% confidence", confidences[i] * 100.0f);
+			}
+			// Foot contact is only known for the frame actually playing right
+			// now -- future points haven't picked a clip yet, so there is
+			// nothing honest to predict there. "Now" is always index
+			// split - 1 (see the split comment above).
+			if (i == split - 1) {
+				text += vformat("\nL=%s R=%s", controller->get_current_left_foot_contact() ? "1" : "0",
+						controller->get_current_right_foot_contact() ? "1" : "0");
+			}
+			label->set_text(text);
+		}
+	}
+
+	// Traversal preview: only draws anything when a traversal instance is
+	// assigned to the controller and it currently detects an obstacle. This
+	// leans entirely on MMTraversal's own probe (see traversal.cpp) -- no
+	// new detection logic here, just a visualization of what it already
+	// found.
+	Ref<MMTraversal> traversal = controller->get_traversal();
+	bool traversal_label_used = false;
+	if (_draw_traversal_preview && traversal.is_valid() &&
+			traversal->get_detected_type() != MMTraversal::TRAVERSAL_NONE) {
+		const Vector3 entry = inverse.xform(traversal->get_entry_point() + lift);
+		const Vector3 top = inverse.xform(traversal->get_top_point() + lift);
+		const Vector3 exit = inverse.xform(traversal->get_exit_point() + lift);
+
+		_draw_circle(entry, _marker_size * 1.4f, _traversal_color);
+		_draw_circle(top, _marker_size * 1.4f, _traversal_color);
+		_draw_circle(exit, _marker_size * 1.4f, _traversal_color);
+		_draw_line(entry, top, _traversal_color);
+		_draw_line(top, exit, _traversal_color);
+
+		if (_draw_frame_labels && traversal_label_index < _label_pool.size()) {
+			static const char *type_names[] = {
+				"None", "Step", "Low Vault", "High Vault", "Mantle", "Climb", "Slide Under"
+			};
+			const int type_index = (int)traversal->get_detected_type();
+			const char *type_name = type_index >= 0 && type_index < 7 ? type_names[type_index] : "?";
+
+			Label3D *label = _label_pool[traversal_label_index];
+			label->set_visible(true);
+			label->set_position(top + Vector3(0, _label_height_offset * 2.0f, 0));
+			label->set_modulate(_traversal_color);
+			label->set_font_size(_label_font_size);
+			label->set_text(vformat("Possible: %s\nheight %.2fm", type_name, traversal->get_obstacle_height()));
+			traversal_label_used = true;
 		}
 	}
 
 	if (_draw_frame_labels) {
-		_hide_labels_from(points.size());
+		_hide_labels_from(traversal_label_used ? label_count : points.size());
 	} else {
 		_hide_labels_from(0);
 	}
@@ -200,6 +261,10 @@ void MMDebugDraw::_bind_methods() {
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::BOOL, draw_facing)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::BOOL, draw_velocity)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::BOOL, draw_frame_labels)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::BOOL, draw_confidence_tier)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, confidence_green_threshold)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, confidence_yellow_threshold)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::BOOL, draw_traversal_preview)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, marker_size)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, floor_offset)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, forward_arrow_length)
@@ -212,4 +277,8 @@ void MMDebugDraw::_bind_methods() {
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, matched_color)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, velocity_color)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, label_color)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, confidence_green)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, confidence_yellow)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, confidence_red)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, traversal_color)
 }
