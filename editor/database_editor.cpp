@@ -408,7 +408,7 @@ void MMDatabaseEditor::_refresh_box_options() {
 		_refresh_database_options();
 		return;
 	}
-	int active = _extra_database->get_active_box();
+	int active = _extra_database->get_active_box_index();
 	if (active < 0 || active >= count) {
 		active = 0;
 	}
@@ -422,7 +422,7 @@ void MMDatabaseEditor::_refresh_database_options() {
 	_database_option->clear();
 	Ref<MMBoxAnimation> box;
 	if (_extra_database.is_valid() && _extra_database->get_box_count() > 0) {
-		int active_box = _extra_database->get_active_box();
+		int active_box = _extra_database->get_active_box_index();
 		if (active_box < 0 || active_box >= _extra_database->get_box_count()) {
 			active_box = 0;
 		}
@@ -444,7 +444,7 @@ void MMDatabaseEditor::_refresh_database_options() {
 		_database_name_edit->set_text("");
 		return;
 	}
-	int active = _extra_database->get_active_database();
+	int active = _extra_database->get_active_database_index();
 	if (active < 0 || active >= count) {
 		active = 0;
 	}
@@ -457,8 +457,8 @@ void MMDatabaseEditor::_on_box_selected(int p_index) {
 	if (_extra_database.is_null()) {
 		return;
 	}
-	_extra_database->set_active_box(p_index);
-	_extra_database->set_active_database(0);
+	_extra_database->set_active_box_index(p_index);
+	_extra_database->set_active_database_index(0);
 	_persist_extra_database();
 	Ref<MMBoxAnimation> box = _extra_database->get_box(p_index);
 	_box_name_edit->set_text(box.is_valid() ? box->get_name() : "");
@@ -475,8 +475,8 @@ void MMDatabaseEditor::_on_add_box_pressed() {
 	}
 	// Unlimited -- this just keeps appending.
 	_extra_database->add_box("New Box");
-	_extra_database->set_active_box(_extra_database->get_box_count() - 1);
-	_extra_database->set_active_database(0);
+	_extra_database->set_active_box_index(_extra_database->get_box_count() - 1);
+	_extra_database->set_active_database_index(0);
 	_persist_extra_database();
 	_refresh_box_options();
 }
@@ -485,23 +485,23 @@ void MMDatabaseEditor::_on_box_name_changed(const String &p_text) {
 	if (_extra_database.is_null()) {
 		return;
 	}
-	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box());
+	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box_index());
 	if (box.is_null()) {
 		return;
 	}
 	box->set_name(p_text);
 	_persist_extra_database();
 	// Keeps the dropdown's own label in sync without a full rebuild.
-	_box_option->set_item_text(_extra_database->get_active_box(), p_text.is_empty() ? vformat("Box %d", _extra_database->get_active_box() + 1) : p_text);
+	_box_option->set_item_text(_extra_database->get_active_box_index(), p_text.is_empty() ? vformat("Box %d", _extra_database->get_active_box_index() + 1) : p_text);
 }
 
 void MMDatabaseEditor::_on_database_selected(int p_index) {
 	if (_extra_database.is_null()) {
 		return;
 	}
-	_extra_database->set_active_database(p_index);
+	_extra_database->set_active_database_index(p_index);
 	_persist_extra_database();
-	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box());
+	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box_index());
 	_database = box.is_valid() ? box->get_database(p_index) : Ref<MotionMatchingDatabase>();
 	_database_name_edit->set_text(_database.is_valid() ? _database->get_name() : "");
 }
@@ -511,13 +511,13 @@ void MMDatabaseEditor::_on_add_database_pressed() {
 		_log_line("Add an animation set (box) first -- use \"+ Add Box\" above.", Color(1, 0.85f, 0.4f));
 		return;
 	}
-	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box());
+	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box_index());
 	if (box.is_null()) {
 		return;
 	}
 	// Unlimited -- this just keeps appending, same as add_box().
 	box->add_database("New Database");
-	_extra_database->set_active_database(box->get_database_count() - 1);
+	_extra_database->set_active_database_index(box->get_database_count() - 1);
 	_persist_extra_database();
 	_refresh_database_options();
 }
@@ -529,8 +529,8 @@ void MMDatabaseEditor::_on_database_name_changed(const String &p_text) {
 	_database->set_name(p_text);
 	_persist_extra_database();
 	if (_extra_database.is_valid()) {
-		_database_option->set_item_text(_extra_database->get_active_database(),
-				p_text.is_empty() ? vformat("Database %d", _extra_database->get_active_database() + 1) : p_text);
+		_database_option->set_item_text(_extra_database->get_active_database_index(),
+				p_text.is_empty() ? vformat("Database %d", _extra_database->get_active_database_index() + 1) : p_text);
 	}
 }
 
@@ -673,7 +673,7 @@ void MMDatabaseEditor::_on_build_pressed() {
 		_log_line("Add an animation set (box) first -- use \"+ Add Box\" above.", Color(1, 0.85f, 0.4f));
 		return;
 	}
-	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box());
+	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box_index());
 	if (box.is_null() || box->get_database_count() == 0) {
 		_log_line("Add a database to this box first -- use \"+ Add Database\" above.", Color(1, 0.85f, 0.4f));
 		return;
@@ -723,7 +723,7 @@ void MMDatabaseEditor::_on_build_pressed() {
 	// one in place -- so the name typed into "Database name" above has to be
 	// carried over by hand, and the box's slot has to be swapped rather than
 	// just reassigning the dock's own _database.
-	const int active_index = _extra_database->get_active_database();
+	const int active_index = _extra_database->get_active_database_index();
 	Ref<MotionMatchingDatabase> previous = box->get_database(active_index);
 	_database->set_name(previous.is_valid() ? previous->get_name() : _database_name_edit->get_text());
 	box->set_database_at(active_index, _database);
