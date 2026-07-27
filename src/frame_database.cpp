@@ -49,6 +49,16 @@ void MotionMatchingDatabase::set_animations(const TypedArray<MMAnimationEntry> &
 	emit_changed();
 }
 
+void MotionMatchingDatabase::set_all_loop(bool p_loop) {
+	for (int i = 0; i < _animations.size(); i++) {
+		Ref<MMAnimationEntry> entry = _animations[i];
+		if (entry.is_valid()) {
+			entry->set_loop(p_loop);
+		}
+	}
+	emit_changed();
+}
+
 int MotionMatchingDatabase::get_frame_count() const {
 	return _frame_animation.size();
 }
@@ -271,6 +281,8 @@ PackedInt32Array MotionMatchingDatabase::find_frames_by_tags(int p_required, int
 }
 
 void MotionMatchingDatabase::_bind_methods() {
+	MM_BIND_PROPERTY(MotionMatchingDatabase, Variant::STRING, name)
+
 	ClassDB::bind_method(D_METHOD("set_schema", "schema"), &MotionMatchingDatabase::set_schema);
 	ClassDB::bind_method(D_METHOD("get_schema"), &MotionMatchingDatabase::get_schema);
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "schema", PROPERTY_HINT_RESOURCE_TYPE, "MMFeatureSchema"),
@@ -281,6 +293,8 @@ void MotionMatchingDatabase::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "animations", PROPERTY_HINT_ARRAY_TYPE,
 						  "24/17:MMAnimationEntry"),
 			"set_animations", "get_animations");
+
+	ClassDB::bind_method(D_METHOD("set_all_loop", "loop"), &MotionMatchingDatabase::set_all_loop);
 
 	MM_BIND_PROPERTY(MotionMatchingDatabase, Variant::FLOAT, sample_rate)
 	MM_BIND_PROPERTY(MotionMatchingDatabase, Variant::INT, format_version)
