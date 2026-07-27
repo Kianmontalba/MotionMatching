@@ -42,6 +42,18 @@ private:
 	// seconds, negative for history) that sample contributed to the
 	// feature vector -- i.e. which "frame" of the query that point is.
 	bool _draw_frame_labels = true;
+	// Colors each point's circle by confidence tier (green/yellow/red)
+	// instead of the plain history/future split. The line and arrows keep
+	// their usual colors either way -- only the circle changes, since that
+	// is the one element that reads cleanly as a single "state" per point.
+	bool _draw_confidence_tier = false;
+	float _confidence_green_threshold = 0.8f;
+	float _confidence_yellow_threshold = 0.5f;
+	// Draws the current traversal probe's entry/top/exit points (if any is
+	// assigned to the controller and currently detects something) as a
+	// separate marker, plus its type name on the frame label of the nearest
+	// trajectory point.
+	bool _draw_traversal_preview = true;
 	float _marker_size = 0.06f;
 	// How far above the raw trajectory points to draw everything. The raw
 	// points sit at the character's root height, which on most rigs is at
@@ -63,6 +75,10 @@ private:
 	Color _matched_color = Color(1.0f, 0.65f, 0.15f);
 	Color _velocity_color = Color(1.0f, 0.85f, 0.1f);
 	Color _label_color = Color(1.0f, 1.0f, 1.0f);
+	Color _confidence_green = Color(0.25f, 1.0f, 0.3f);
+	Color _confidence_yellow = Color(1.0f, 0.9f, 0.2f);
+	Color _confidence_red = Color(1.0f, 0.25f, 0.25f);
+	Color _traversal_color = Color(1.0f, 0.15f, 0.85f);
 
 	// Reused every frame instead of freed and recreated, so a long play
 	// session doesn't churn nodes just because the trajectory is redrawn
@@ -107,6 +123,10 @@ public:
 	MM_ACCESSORS(bool, draw_facing)
 	MM_ACCESSORS(bool, draw_velocity)
 	MM_ACCESSORS(bool, draw_frame_labels)
+	MM_ACCESSORS(bool, draw_confidence_tier)
+	MM_ACCESSORS(float, confidence_green_threshold)
+	MM_ACCESSORS(float, confidence_yellow_threshold)
+	MM_ACCESSORS(bool, draw_traversal_preview)
 	MM_ACCESSORS(float, marker_size)
 	MM_ACCESSORS(float, floor_offset)
 	MM_ACCESSORS(float, forward_arrow_length)
@@ -119,6 +139,10 @@ public:
 	MM_ACCESSORS(Color, matched_color)
 	MM_ACCESSORS(Color, velocity_color)
 	MM_ACCESSORS(Color, label_color)
+	MM_ACCESSORS(Color, confidence_green)
+	MM_ACCESSORS(Color, confidence_yellow)
+	MM_ACCESSORS(Color, confidence_red)
+	MM_ACCESSORS(Color, traversal_color)
 
 	void _ready() override;
 	void _process(double p_delta) override;
