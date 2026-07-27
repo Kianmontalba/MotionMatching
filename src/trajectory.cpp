@@ -236,6 +236,33 @@ PackedVector3Array MMTrajectory::get_debug_directions() const {
 	return directions;
 }
 
+PackedVector3Array MMTrajectory::get_debug_velocities() const {
+	PackedVector3Array velocities;
+	for (int i = _history.size() - 1; i >= 0; i--) {
+		velocities.push_back(_history[i].velocity);
+	}
+	velocities.push_back(_velocity);
+	for (int i = 0; i < _future.size(); i++) {
+		velocities.push_back(_future[i].velocity);
+	}
+	return velocities;
+}
+
+PackedFloat32Array MMTrajectory::get_debug_times() const {
+	PackedFloat32Array times;
+	for (int i = _history.size() - 1; i >= 0; i--) {
+		// History samples are stored nearest-first; walk them back to front
+		// so the returned array reads oldest-to-newest like the other
+		// debug arrays, with time counting down to zero at "now".
+		times.push_back(-_history_interval * (float)(i + 1));
+	}
+	times.push_back(0.0f);
+	for (int i = 0; i < _future.size(); i++) {
+		times.push_back(_future[i].time);
+	}
+	return times;
+}
+
 void MMTrajectory::_bind_methods() {
 	MM_BIND_PROPERTY(MMTrajectory, Variant::FLOAT, halflife_position)
 	MM_BIND_PROPERTY(MMTrajectory, Variant::FLOAT, halflife_direction)
@@ -261,4 +288,6 @@ void MMTrajectory::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_sample_velocity", "index"), &MMTrajectory::get_sample_velocity);
 	ClassDB::bind_method(D_METHOD("get_debug_points"), &MMTrajectory::get_debug_points);
 	ClassDB::bind_method(D_METHOD("get_debug_directions"), &MMTrajectory::get_debug_directions);
+	ClassDB::bind_method(D_METHOD("get_debug_velocities"), &MMTrajectory::get_debug_velocities);
+	ClassDB::bind_method(D_METHOD("get_debug_times"), &MMTrajectory::get_debug_times);
 }
