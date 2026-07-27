@@ -327,6 +327,13 @@ public:
 	bool take_seek_request();
 
 	int get_current_frame() const { return _current_frame; }
+
+	// Foot contact of the currently playing frame, read from the same data
+	// the feature extractor wrote during database build. Split out of
+	// get_debug_info() so a per-frame consumer (the 3D debug draw) doesn't
+	// have to build the whole info Dictionary just for these two bits.
+	bool get_current_left_foot_contact() const;
+	bool get_current_right_foot_contact() const;
 	int get_current_animation_id() const { return _current_animation; }
 	Ref<MMRootMotion> get_root_motion() const { return _root_motion; }
 	Transform3D consume_root_motion();
