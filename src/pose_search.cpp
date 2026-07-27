@@ -341,6 +341,74 @@ Dictionary MMPoseSearch::search_brute_force_query(const PackedFloat32Array &p_qu
 	return output;
 }
 
+Array MMPoseSearch::search_top_candidates_debug_raw(const float *p_query, const Ref<MMCostFunction> &p_cost,
+		const MMSearchFilter &p_filter, int p_count) const {
+	Array results;
+	if (_database.is_null() || p_cost.is_null() || p_count <= 0 || p_query == nullptr) {
+		return results;
+	}
+
+	const float *weights = p_cost->get_dimension_weights();
+	const int frame_count = _database->get_frame_count();
+
+	// Small sorted top-K kept as parallel arrays, worst-to-best insertion.
+	// p_count is expected to be a handful (3-5), so a linear insertion costs
+	// nothing next to the per-frame cost computation it rides alongside.
+	Vector<int> top_frames;
+	Vector<float> top_costs;
+
+	for (int frame = 0; frame < frame_count; frame++) {
+		if (!p_filter.accepts(_database->get_frame_tag_mask(frame),
+					_database->get_frame_category_id(frame), _database->get_frame_speed_value(frame))) {
+			continue;
+		}
+
+		// No early-out here: a cost abandoned mid-computation by the fast
+		// path would misrepresent a near-miss as worse than it really is,
+		// and this list exists specifically to show accurate near-misses.
+		const float cost = p_cost->compute_raw(p_query, _database->get_frame_features(frame),
+				weights, _dimension, MM_INFINITY);
+
+		int insert_at = top_frames.size();
+		for (int i = 0; i < top_frames.size(); i++) {
+			if (cost < top_costs[i]) {
+				insert_at = i;
+				break;
+			}
+		}
+		if (insert_at >= p_count) {
+			continue;
+		}
+		top_frames.insert(insert_at, frame);
+		top_costs.insert(insert_at, cost);
+		if (top_frames.size() > p_count) {
+			top_frames.remove_at(top_frames.size() - 1);
+			top_costs.remove_at(top_costs.size() - 1);
+		}
+	}
+
+	for (int i = 0; i < top_frames.size(); i++) {
+		Dictionary entry = _database->get_frame_info(top_frames[i]);
+		entry["cost"] = top_costs[i];
+		results.push_back(entry);
+	}
+	return results;
+}
+
+Array MMPoseSearch::search_top_candidates_debug(const PackedFloat32Array &p_query, const Ref<MMCostFunction> &p_cost,
+		int p_required_tags, int p_blocked_tags, int p_category_mask, int p_count) const {
+	if (p_query.size() < _dimension) {
+		return Array();
+	}
+
+	MMSearchFilter filter;
+	filter.required_tags = (uint32_t)p_required_tags;
+	filter.blocked_tags = (uint32_t)p_blocked_tags;
+	filter.category_mask = (uint32_t)p_category_mask;
+
+	return search_top_candidates_debug_raw(p_query.ptr(), p_cost, filter, p_count);
+}
+
 void MMPoseSearch::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("build", "database"), &MMPoseSearch::build);
 	ClassDB::bind_method(D_METHOD("clear"), &MMPoseSearch::clear);
@@ -354,6 +422,9 @@ void MMPoseSearch::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("search_brute_force_query", "query", "cost", "required_tags",
 								 "blocked_tags", "category_mask"),
 			&MMPoseSearch::search_brute_force_query);
+	ClassDB::bind_method(D_METHOD("search_top_candidates_debug", "query", "cost", "required_tags",
+								 "blocked_tags", "category_mask", "count"),
+			&MMPoseSearch::search_top_candidates_debug);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "leaf_size"), "set_leaf_size", "get_leaf_size");
 }
