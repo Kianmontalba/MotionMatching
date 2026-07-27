@@ -7,6 +7,8 @@
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/templates/vector.hpp>
+#include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
 
 namespace godot {
 
@@ -97,6 +99,20 @@ public:
 	// search agrees with the reference implementation on the same query.
 	Dictionary search_brute_force_query(const PackedFloat32Array &p_query, const Ref<MMCostFunction> &p_cost,
 			int p_required_tags, int p_blocked_tags, int p_category_mask);
+
+	// Debug-only candidate list: the p_count best frames by exact cost, no
+	// pruning. This is O(frame_count) per call -- a candidate-preview panel
+	// polling a few times a second is fine, calling it every gameplay frame
+	// is not. The runtime search() never calls this; it exists purely so a
+	// debug panel can show why the winner beat the runners-up, not just what
+	// the winner was.
+	Array search_top_candidates_debug_raw(const float *p_query, const Ref<MMCostFunction> &p_cost,
+			const MMSearchFilter &p_filter, int p_count) const;
+
+	// Scriptable wrapper for search_top_candidates_debug_raw(), mirroring
+	// search_query()'s tag/category encoding.
+	Array search_top_candidates_debug(const PackedFloat32Array &p_query, const Ref<MMCostFunction> &p_cost,
+			int p_required_tags, int p_blocked_tags, int p_category_mask, int p_count) const;
 };
 
 } // namespace godot
