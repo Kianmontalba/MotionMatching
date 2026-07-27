@@ -82,6 +82,37 @@ void MMDebugTools::_on_refresh_pressed() {
 		_readout->add_text("\nSearch budget exceeded: the result is the best found so far.\n");
 		_readout->pop();
 	}
+
+	// Per-group share of the winning frame's cost. Percentages, not raw
+	// numbers, because the raw error scale depends on the weights the user
+	// has set and isn't meaningful on its own -- "pose 40%" is.
+	const Dictionary breakdown = controller->get_debug_cost_breakdown();
+	if (!breakdown.is_empty()) {
+		_readout->add_text("\nSearch Cost:\n");
+		static const char *group_order[] = {
+			"pose_position", "pose_velocity", "trajectory_position",
+			"trajectory_direction", "root_velocity", "extra"
+		};
+		for (const char *group : group_order) {
+			if (breakdown.has(group)) {
+				_readout->add_text(vformat("  %-20s %5.1f%%\n", group, (double)breakdown[group]));
+			}
+		}
+	}
+
+	// Exact-cost runners-up, not the fast path's pruned candidates -- see
+	// MMPoseSearch::search_top_candidates_debug_raw() for why the two differ.
+	const Array candidates = controller->get_debug_candidates(3);
+	if (!candidates.is_empty()) {
+		_readout->add_text("\nTop candidates:\n");
+		static const char *rank_labels[] = { "Top", "2nd", "3rd" };
+		for (int i = 0; i < candidates.size(); i++) {
+			const Dictionary candidate = candidates[i];
+			const String label = i < 3 ? String(rank_labels[i]) : vformat("#%d", i + 1);
+			_readout->add_text(vformat("  %-4s %-24s cost %.4f\n", label,
+					candidate.get("clip_name", ""), (double)candidate.get("cost", 0.0)));
+		}
+	}
 }
 
 void MMDebugTools::_bind_methods() {
