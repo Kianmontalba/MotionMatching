@@ -76,6 +76,20 @@ void MMDebugTools::_on_refresh_pressed() {
 	_readout->add_text(vformat("Database        %s frames\n", info.get("database_frames", 0)));
 	_readout->add_text(vformat("Grounded        %s   time in clip %.2f s\n", info.get("grounded", true),
 			(double)info.get("time_in_clip", 0.0)));
+	_readout->add_text(vformat("Feet            L=%s  R=%s\n",
+			(bool)info.get("left_foot_contact", false) ? "contact" : "lifted",
+			(bool)info.get("right_foot_contact", false) ? "contact" : "lifted"));
+
+	if ((bool)info.get("traversal_active", false)) {
+		static const char *traversal_names[] = {
+			"None", "Step", "Low Vault", "High Vault", "Mantle", "Climb", "Slide Under"
+		};
+		const int traversal_type = (int)info.get("traversal_type", 0);
+		const char *traversal_name = traversal_type >= 0 && traversal_type < 7
+				? traversal_names[traversal_type]
+				: "?";
+		_readout->add_text(vformat("Traversal       %s\n", traversal_name));
+	}
 
 	if ((bool)info.get("budget_exceeded", false)) {
 		_readout->push_color(Color(1, 0.6f, 0.3f));
@@ -109,8 +123,10 @@ void MMDebugTools::_on_refresh_pressed() {
 		for (int i = 0; i < candidates.size(); i++) {
 			const Dictionary candidate = candidates[i];
 			const String label = i < 3 ? String(rank_labels[i]) : vformat("#%d", i + 1);
-			_readout->add_text(vformat("  %-4s %-24s cost %.4f\n", label,
-					candidate.get("clip_name", ""), (double)candidate.get("cost", 0.0)));
+			_readout->add_text(vformat("  %-4s %-24s cost %.4f  (L=%s R=%s)\n", label,
+					candidate.get("clip_name", ""), (double)candidate.get("cost", 0.0),
+					(bool)candidate.get("left_foot_contact", false) ? "1" : "0",
+					(bool)candidate.get("right_foot_contact", false) ? "1" : "0"));
 		}
 	}
 }
