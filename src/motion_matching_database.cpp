@@ -18,10 +18,13 @@ void MotionMatchingResource::set_animation_library(const Ref<AnimationLibrary> &
 	emit_changed();
 }
 
-void MotionMatchingResource::set_database(const Ref<MotionMatchingDatabase> &p_database) {
+void MotionMatchingResource::set_database(const Ref<MMExtraDatabase> &p_database) {
 	_database = p_database;
 	if (_database.is_valid() && _schema.is_null()) {
-		_schema = _database->get_schema();
+		Ref<MotionMatchingDatabase> active = _database->get_active_database();
+		if (active.is_valid()) {
+			_schema = active->get_schema();
+		}
 	}
 	emit_changed();
 }
@@ -139,7 +142,7 @@ void MotionMatchingResource::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_database", "database"), &MotionMatchingResource::set_database);
 	ClassDB::bind_method(D_METHOD("get_database"), &MotionMatchingResource::get_database);
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "database", PROPERTY_HINT_RESOURCE_TYPE,
-						  "MotionMatchingDatabase"),
+						  "MMExtraDatabase"),
 			"set_database", "get_database");
 
 	ClassDB::bind_method(D_METHOD("set_schema", "schema"), &MotionMatchingResource::set_schema);
