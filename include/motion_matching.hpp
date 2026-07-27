@@ -334,6 +334,19 @@ public:
 	Dictionary get_debug_info() const;
 	PackedVector3Array get_debug_trajectory() const;
 
+	// Debug-only: the p_count best-matching frames by exact cost, using the
+	// same filter the most recent search used. O(database frame count) per
+	// call -- fine for a debug panel polling a few times a second, not for
+	// every gameplay frame. See
+	// MMPoseSearch::search_top_candidates_debug_raw() for why the cost here
+	// is exact rather than the fast path's pruned value.
+	Array get_debug_candidates(int p_count = 3) const;
+
+	// Debug-only: each feature group's share of the winning frame's total
+	// cost, as a percentage -- e.g. {"pose_position": 40.0, "trajectory_position":
+	// 35.0, ...}. Empty if nothing has matched yet.
+	Dictionary get_debug_cost_breakdown() const;
+
 	// ---- Optional subsystems, opt-in by assignment ----
 
 	// Search-phase profiler. Always present (see the member comment), but
