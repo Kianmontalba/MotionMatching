@@ -1,570 +1,148 @@
 #ifdef TOOLS_ENABLED
 
 #include "motion_matching_editor.hpp"
-#include "animation_library.hpp"
 
 #include <godot_cpp/classes/editor_interface.hpp>
-#include <godot_cpp/classes/h_box_container.hpp>
-#include <godot_cpp/classes/resource_loader.hpp>
-#include <godot_cpp/classes/resource_saver.hpp>
 #include <godot_cpp/core/class_db.hpp>
-#include <godot_cpp/variant/utility_functions.hpp>
-#include <godot_cpp/classes/scene_tree.hpp>
 
 using namespace godot;
 
-// ---------------------------------------------------------------------------
-// MMNodePathField
-// ---------------------------------------------------------------------------
+MotionMatchingEditorPlugin::MotionMatchingEditorPlugin() {
+	_root = memnew(VBoxContainer);
 
-bool MMNodePathField::_can_drop_data(const Vector2 &p_point, const Variant &p_data) const {
-	if (p_data.get_type() != Variant::DICTIONARY) {
-		return false;
-	}
-	const Dictionary data = p_data;
-	// This is the same drag payload shape the Scene dock hands to every
-	// built-in NodePath field in the Inspector -- matching it means this
-	// field accepts a drop exactly where a person would already expect one
-	// to work.
-	return String(data.get("type", "")) == "nodes";
+	HBoxContainer *toolbar = memnew(HBoxContainer);
+	Control *spacer = memnew(Control);
+	spacer->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	toolbar->add_child(spacer);
+	_fullscreen_button = memnew(Button);
+	_fullscreen_button->set_text("Full Screen");
+	_fullscreen_button->set_tooltip_text(
+			"Open this dock in its own large window, so the Database, Features, "
+			"Trajectory and Profiler tabs stop competing for space with the bottom "
+			"panel's fixed height.");
+	toolbar->add_child(_fullscreen_button);
+	_root->add_child(toolbar);
+
+	_panel = memnew(TabContainer);
+	_panel->set_custom_minimum_size(Vector2(0, 320));
+	_panel->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	_root->add_child(_panel);
+
+	_database_editor = memnew(MMDatabaseEditor);
+	_database_editor->set_name("Database");
+	_panel->add_child(_database_editor);
+
+	_feature_editor = memnew(MMFeatureEditor);
+	_feature_editor->set_name("Features and Weights");
+	_panel->add_child(_feature_editor);
+
+	_trajectory_editor = memnew(MMTrajectoryEditor);
+	_trajectory_editor->set_name("Trajectory");
+	_panel->add_child(_trajectory_editor);
+
+	_debug_tools = memnew(MMDebugTools);
+	_debug_tools->set_name("Profiler");
+	_panel->add_child(_debug_tools);
+
+	// The database builder needs the schema the feature editor owns, so the
+	// two tools share one resource instead of each holding a copy.
+	_database_editor->set_schema(_feature_editor->get_schema());
 }
 
-void MMNodePathField::_drop_data(const Vector2 &p_point, const Variant &p_data) {
-	const Dictionary data = p_data;
-	const Array dropped = data.get("nodes", Array());
-	if (dropped.is_empty()) {
-		return;
-	}
-
-	Node *scene_root = EditorInterface::get_singleton()->get_edited_scene_root();
-	if (scene_root == nullptr || scene_root->get_tree() == nullptr) {
-		return;
-	}
-
-	// Resolved through the live SceneTree rather than string-parsed: the
-	// dropped path from the Scene dock has always been absolute in every
-	// Godot 4 release this addon targets, but going through the actual
-	// Node means a future change to that format cannot silently write a
-	// wrong path in here -- it would just fail to resolve and the drop
-	// would be quietly ignored instead.
-	Node *dropped_node = scene_root->get_tree()->get_root()->get_node_or_null(NodePath(dropped[0]));
-	if (dropped_node == nullptr) {
-		// Fall back to treating the payload as already relative to the
-		// edited scene root, in case that assumption above ever changes.
-		dropped_node = scene_root->get_node_or_null(NodePath(dropped[0]));
-	}
-	if (dropped_node == nullptr) {
-		return;
-	}
-
-	// Always re-expressed relative to the edited scene root, not copied
-	// verbatim -- this is what _resolve_skeleton() expects, and what keeps
-	// the path correct if the scene is ever renamed or moved.
-	set_text(String(scene_root->get_path_to(dropped_node)));
-	grab_focus();
-	emit_signal("text_changed", get_text());
-	emit_signal("text_submitted", get_text());
+String MotionMatchingEditorPlugin::_get_plugin_name() const {
+	return "Motion Matching";
 }
 
-void MMNodePathField::_bind_methods() {
-}
-
-// Small helper for the repetitive "label plus field on one row" layout.
-static HBoxContainer *mm_add_row(VBoxContainer *p_parent, const String &p_label, Control *p_control) {
-	HBoxContainer *row = memnew(HBoxContainer);
-	Label *label = memnew(Label);
-	label->set_text(p_label);
-	label->set_custom_minimum_size(Vector2(180, 0));
-	row->add_child(label);
-	p_control->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	row->add_child(p_control);
-	p_parent->add_child(row);
-	return row;
-}
-
-MMDatabaseEditor::MMDatabaseEditor() {
-	_resource_picker = memnew(EditorResourcePicker);
-	_resource_picker->set_base_type("MotionMatchingResource");
-	mm_add_row(this, "Motion Matching Resource", _resource_picker);
-
-	_skeleton_path = memnew(MMNodePathField);
-	_skeleton_path->set_text("%GeneralSkeleton");
-	_skeleton_path->set_placeholder("Type a path, drag a node in from the Scene dock, or use Pick...");
-	_skeleton_path->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-
-	_skeleton_picker_button = memnew(Button);
-	_skeleton_picker_button->set_text("Pick...");
-	_skeleton_picker_button->set_tooltip_text("Browse every Skeleton3D node in the current scene");
-
-	HBoxContainer *skeleton_row = memnew(HBoxContainer);
-	skeleton_row->add_child(_skeleton_path);
-	skeleton_row->add_child(_skeleton_picker_button);
-	mm_add_row(this, "Skeleton node path", skeleton_row);
-
-	_skeleton_popup = memnew(PopupMenu);
-	add_child(_skeleton_popup);
-
-	// Backed by the resource above, not a typed-in path: picking (or
-	// dropping) a library here writes it straight onto the Motion Matching
-	// Resource and saves that resource to disk immediately, so it survives
-	// closing the dock, switching scenes, or an addon reload -- none of
-	// which this control's own state would otherwise survive.
-	_library_picker = memnew(EditorResourcePicker);
-	_library_picker->set_base_type("AnimationLibrary");
-	mm_add_row(this, "Animation library", _library_picker);
-
-	_sample_rate = memnew(SpinBox);
-	_sample_rate->set_min(10);
-	_sample_rate->set_max(120);
-	_sample_rate->set_value(30);
-	mm_add_row(this, "Sample rate (Hz)", _sample_rate);
-
-	_root_yaw_offset = memnew(SpinBox);
-	_root_yaw_offset->set_min(-180);
-	_root_yaw_offset->set_max(180);
-	_root_yaw_offset->set_step(1);
-	_root_yaw_offset->set_value(0);
-	mm_add_row(this, "Root yaw offset (degrees)", _root_yaw_offset);
-
-	_left_foot_override = memnew(LineEdit);
-	_left_foot_override->set_placeholder("Leave empty to auto-detect");
-	mm_add_row(this, "Left foot bone (override)", _left_foot_override);
-
-	_right_foot_override = memnew(LineEdit);
-	_right_foot_override->set_placeholder("Leave empty to auto-detect");
-	mm_add_row(this, "Right foot bone (override)", _right_foot_override);
-
-	HBoxContainer *buttons = memnew(HBoxContainer);
-	_scan_button = memnew(Button);
-	_scan_button->set_text("Scan library");
-	buttons->add_child(_scan_button);
-
-	_validate_button = memnew(Button);
-	_validate_button->set_text("Validate");
-	buttons->add_child(_validate_button);
-
-	_build_button = memnew(Button);
-	_build_button->set_text("Build database");
-	buttons->add_child(_build_button);
-
-	_save_button = memnew(Button);
-	_save_button->set_text("Save");
-	buttons->add_child(_save_button);
-	add_child(buttons);
-
-	_progress = memnew(ProgressBar);
-	_progress->set_max(1.0);
-	add_child(_progress);
-
-	_clip_table = memnew(Tree);
-	_clip_table->set_columns(4);
-	_clip_table->set_column_titles_visible(true);
-	_clip_table->set_column_title(0, "Clip");
-	_clip_table->set_column_title(1, "Category");
-	_clip_table->set_column_title(2, "Tags");
-	_clip_table->set_column_title(3, "Length");
-	_clip_table->set_v_size_flags(SIZE_EXPAND_FILL);
-	_clip_table->set_custom_minimum_size(Vector2(0, 160));
-	add_child(_clip_table);
-
-	_log = memnew(RichTextLabel);
-	_log->set_custom_minimum_size(Vector2(0, 90));
-	add_child(_log);
-}
-
-void MMDatabaseEditor::_ready() {
-	_resource_picker->connect("resource_changed", Callable(this, "_on_resource_picked"));
-	_library_picker->connect("resource_changed", Callable(this, "_on_library_picked"));
-	_skeleton_path->connect("text_changed", Callable(this, "_on_skeleton_path_changed"));
-	_skeleton_picker_button->connect("pressed", Callable(this, "_on_skeleton_picker_pressed"));
-	_skeleton_popup->connect("index_pressed", Callable(this, "_on_skeleton_popup_selected"));
-	_left_foot_override->connect("text_changed", Callable(this, "_on_left_foot_override_changed"));
-	_right_foot_override->connect("text_changed", Callable(this, "_on_right_foot_override_changed"));
-	_scan_button->connect("pressed", Callable(this, "_on_scan_pressed"));
-	_build_button->connect("pressed", Callable(this, "_on_build_pressed"));
-	_save_button->connect("pressed", Callable(this, "_on_save_pressed"));
-	_validate_button->connect("pressed", Callable(this, "_on_validate_pressed"));
-	_log_line("Ready. Assign a Motion Matching Resource, point at a Skeleton3D, then scan a library.");
-}
-
-void MMDatabaseEditor::_log_line(const String &p_text, const Color &p_color) {
-	if (_log == nullptr) {
-		return;
-	}
-	_log->push_color(p_color);
-	_log->add_text(p_text + String("\n"));
-	_log->pop();
-}
-
-Skeleton3D *MMDatabaseEditor::_resolve_skeleton() {
-	Node *root = EditorInterface::get_singleton()->get_edited_scene_root();
-	if (root == nullptr) {
-		_log_line("No scene is open.", Color(1, 0.5f, 0.4f));
-		return nullptr;
-	}
-	Node *node = root->get_node_or_null(NodePath(_skeleton_path->get_text()));
-	Skeleton3D *skeleton = Object::cast_to<Skeleton3D>(node);
-	if (skeleton == nullptr) {
-		_log_line("Could not resolve a Skeleton3D at that path.", Color(1, 0.5f, 0.4f));
-	}
-	return skeleton;
-}
-
-void MMDatabaseEditor::_on_resource_picked(const Ref<Resource> &p_resource) {
-	_mm_resource = p_resource;
-	if (_mm_resource.is_null()) {
-		_log_line("Motion Matching Resource cleared.", Color(1, 0.85f, 0.4f));
-		return;
-	}
-
-	// Load whatever this resource already has assigned, rather than leaving
-	// the dock showing something unrelated to the resource just picked.
-	_library_picker->set_edited_resource(_mm_resource->get_animation_library());
-	_library = _mm_resource->get_animation_library();
-	_database = _mm_resource->get_database();
-	_schema = _mm_resource->get_schema();
-	if (!_mm_resource->get_skeleton_path().is_empty()) {
-		_skeleton_path->set_text(String(_mm_resource->get_skeleton_path()));
-	}
-	_left_foot_override->set_text(_mm_resource->get_left_foot_override());
-	_right_foot_override->set_text(_mm_resource->get_right_foot_override());
-
-	if (_library.is_valid()) {
-		_clip_settings = MMAnimationLibraryTools::auto_tag_library(_library);
-		_populate_table();
-	} else {
-		_clip_table->clear();
-	}
-
-	_log_line("Loaded " + _mm_resource->get_path(), Color(0.5f, 1.0f, 0.6f));
-}
-
-void MMDatabaseEditor::_on_library_picked(const Ref<Resource> &p_resource) {
-	_library = p_resource;
-
-	if (_mm_resource.is_valid()) {
-		// Persisted immediately, not just held in the dock's own memory --
-		// this is what makes the pick survive closing the dock or an addon
-		// reload, unlike a typed-in path that lived only in a LineEdit.
-		_mm_resource->set_animation_library(_library);
-		if (!_mm_resource->get_path().is_empty()) {
-			const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-			if (error != OK) {
-				_log_line(vformat("Could not save the library pick back to %s (error %d).",
-								_mm_resource->get_path(), (int)error),
-						Color(1, 0.5f, 0.4f));
-			}
-		} else {
-			_log_line(
-					"Motion Matching Resource has not been saved to disk yet, so this pick will "
-					"only last for the current editor session. Save it once from the Inspector "
-					"and the pick will start persisting automatically.",
-					Color(1, 0.85f, 0.4f));
-		}
-	}
-
-	if (_library.is_null()) {
-		_clip_table->clear();
-		return;
-	}
-
-	// Auto tagging is a starting point, not the answer. The table stays
-	// editable so a wrong guess costs one click, not a rebuild.
-	_clip_settings = MMAnimationLibraryTools::auto_tag_library(_library);
-	_populate_table();
-	_log_line(vformat("Scanned %d clips and suggested tags for each.",
-			_library->get_animation_list().size()));
-}
-
-void MMDatabaseEditor::_on_skeleton_path_changed(const String &p_text) {
-	if (_mm_resource.is_null()) {
-		return;
-	}
-	// Same persist-immediately pattern as _on_library_picked(): written onto
-	// the resource (and saved to disk, if it has one) as soon as it changes,
-	// so a dropped or typed path survives closing the dock, switching
-	// scenes, or an addon reload, instead of resetting to the placeholder.
-	_mm_resource->set_skeleton_path(NodePath(p_text));
-	if (_mm_resource->get_path().is_empty()) {
-		return;
-	}
-	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-	if (error != OK) {
-		_log_line(vformat("Could not save the skeleton path back to %s (error %d).",
-							_mm_resource->get_path(), (int)error),
-				Color(1, 0.5f, 0.4f));
+void MotionMatchingEditorPlugin::_enter_tree() {
+	_bottom_panel_button = add_control_to_bottom_panel(_root, "Motion Matching");
+	_fullscreen_button->connect("pressed", Callable(this, "_on_fullscreen_pressed"));
+	if (_bottom_panel_button != nullptr) {
+		_bottom_panel_button->connect("toggled", Callable(this, "_on_bottom_panel_toggled"));
 	}
 }
 
-void MMDatabaseEditor::_on_left_foot_override_changed(const String &p_text) {
-	if (_mm_resource.is_null()) {
-		return;
+void MotionMatchingEditorPlugin::_exit_tree() {
+	// If the dock is currently floated out, bring _panel back into _root
+	// first -- otherwise memdelete(_root) below would never reach it, and
+	// closing the window afterwards would touch a freed _panel.
+	if (_fullscreen_window != nullptr) {
+		_on_fullscreen_window_close_requested();
+		memdelete(_fullscreen_window);
+		_fullscreen_window = nullptr;
 	}
-	// Same persist-immediately pattern as _on_skeleton_path_changed().
-	_mm_resource->set_left_foot_override(p_text);
-	if (_mm_resource->get_path().is_empty()) {
-		return;
-	}
-	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-	if (error != OK) {
-		_log_line(vformat("Could not save the left foot override back to %s (error %d).",
-							_mm_resource->get_path(), (int)error),
-				Color(1, 0.5f, 0.4f));
-	}
-}
 
-void MMDatabaseEditor::_on_right_foot_override_changed(const String &p_text) {
-	if (_mm_resource.is_null()) {
-		return;
-	}
-	_mm_resource->set_right_foot_override(p_text);
-	if (_mm_resource->get_path().is_empty()) {
-		return;
-	}
-	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-	if (error != OK) {
-		_log_line(vformat("Could not save the right foot override back to %s (error %d).",
-							_mm_resource->get_path(), (int)error),
-				Color(1, 0.5f, 0.4f));
+	remove_control_from_bottom_panel(_root);
+	if (_root != nullptr) {
+		memdelete(_root);
+		_root = nullptr;
+		_panel = nullptr;
 	}
 }
 
-void MMDatabaseEditor::_on_scan_pressed() {
-	// Re-reads whatever is currently assigned rather than a remembered path,
-	// so pressing Scan after e.g. calling refresh_all() on an
-	// MMAnimationLibrary picks up files that were added or removed since the
-	// library was first picked.
-	_on_library_picked(_library_picker->get_edited_resource());
+void MotionMatchingEditorPlugin::_on_fullscreen_pressed() {
+	if (_panel == nullptr) {
+		return;
+	}
+	if (_fullscreen_window != nullptr && _panel->get_parent() == _fullscreen_window) {
+		// Already floated out from an earlier press -- just bring the
+		// existing window forward instead of trying to reparent again.
+		_fullscreen_window->show();
+		_fullscreen_window->grab_focus();
+		return;
+	}
+
+	if (_fullscreen_window == nullptr) {
+		_fullscreen_window = memnew(Window);
+		_fullscreen_window->set_title("Motion Matching");
+		_fullscreen_window->connect("close_requested", Callable(this, "_on_fullscreen_window_close_requested"));
+		EditorInterface::get_singleton()->get_base_control()->add_child(_fullscreen_window);
+	}
+
+	_root->remove_child(_panel);
+	_fullscreen_window->add_child(_panel);
+	_panel->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+
+	// An ordinary, OS decorated window sized to 95% of the screen -- not
+	// exclusive fullscreen video mode, which would fight the editor for the
+	// whole display. The window's own native close button is the "X" that
+	// sends this back to the bottom panel; there is no button drawn for it
+	// inside the dock itself.
+	_fullscreen_window->popup_centered_ratio(0.95f);
+	_fullscreen_button->set_visible(false);
+
+	// _root is left holding nothing but its toolbar row once _panel moves
+	// out -- collapsing the bottom dock here instead of leaving that mostly
+	// empty strip on screen is what makes opening the "Motion Matching" tab
+	// go straight to full screen rather than to a half-empty docked panel.
+	hide_bottom_panel();
 }
 
-void MMDatabaseEditor::_populate_table() {
-	_clip_table->clear();
-	if (_library.is_null()) {
-		return;
-	}
-
-	TreeItem *root = _clip_table->create_item();
-	_clip_table->set_hide_root(true);
-
-	const PackedStringArray names = _library->get_animation_list();
-	static const char *category_names[] = { "Locomotion", "Airborne", "Traversal", "Combat",
-		"Interaction", "Custom" };
-
-	for (int i = 0; i < names.size(); i++) {
-		Ref<Animation> animation = _library->get_animation(names[i]);
-		const Dictionary settings = _clip_settings.get(names[i], Dictionary());
-		const int category = settings.get("category", 0);
-		const int tags = settings.get("tags", 0);
-
-		TreeItem *item = _clip_table->create_item(root);
-		item->set_text(0, names[i]);
-		item->set_text(1, category >= 0 && category < MM_CATEGORY_MAX ? category_names[category] : "?");
-		item->set_text(2, String::num_int64(tags));
-		item->set_text(3, animation.is_valid() ? vformat("%.2fs", animation->get_length()) : "-");
-		item->set_editable(2, true);
-	}
-}
-
-void MMDatabaseEditor::_collect_skeletons(Node *p_node, Node *p_scene_root) {
-	if (Object::cast_to<Skeleton3D>(p_node) != nullptr) {
-		// Stored relative to the scene root, same convention _resolve_skeleton()
-		// and the drag-and-drop path already use -- so picking one here writes
-		// exactly the same kind of path a drop or a hand-typed one would.
-		_skeleton_candidates.push_back(String(p_scene_root->get_path_to(p_node)));
-	}
-	for (int i = 0; i < p_node->get_child_count(); i++) {
-		_collect_skeletons(p_node->get_child(i), p_scene_root);
-	}
-}
-
-void MMDatabaseEditor::_on_skeleton_picker_pressed() {
-	Node *scene_root = EditorInterface::get_singleton()->get_edited_scene_root();
-	if (scene_root == nullptr) {
-		_log_line("No scene is open.", Color(1, 0.5f, 0.4f));
-		return;
-	}
-
-	_skeleton_candidates.clear();
-	_collect_skeletons(scene_root, scene_root);
-
-	if (_skeleton_candidates.is_empty()) {
-		_log_line("No Skeleton3D node found in the current scene.", Color(1, 0.85f, 0.4f));
-		return;
-	}
-
-	_skeleton_popup->clear();
-	for (int i = 0; i < _skeleton_candidates.size(); i++) {
-		_skeleton_popup->add_item(_skeleton_candidates[i]);
-	}
-
-	// Dropped right under the button, the same place any other editor popup
-	// (like an OptionButton) would open.
-	const Rect2 button_rect = _skeleton_picker_button->get_screen_rect();
-	_skeleton_popup->set_position(Vector2i(button_rect.position.x, button_rect.position.y + button_rect.size.y));
-	_skeleton_popup->popup();
-}
-
-void MMDatabaseEditor::_on_skeleton_popup_selected(int p_index) {
-	if (p_index < 0 || p_index >= _skeleton_candidates.size()) {
-		return;
-	}
-	_skeleton_path->set_text(_skeleton_candidates[p_index]);
-	// MMNodePathField's own text_changed signal only fires on user typing,
-	// not on a programmatic set_text() -- so this mirrors what dropping a
-	// node already does, calling the same handler directly to persist the
-	// pick onto the resource immediately.
-	_on_skeleton_path_changed(_skeleton_candidates[p_index]);
-}
-
-void MMDatabaseEditor::_on_validate_pressed() {
-	Skeleton3D *skeleton = _resolve_skeleton();
-	if (skeleton == nullptr || _library.is_null()) {
-		return;
-	}
-	if (_schema.is_null()) {
-		_schema = MMFeatureSchema::make_default();
-	}
-
-	const Array issues = MMAnimationLibraryTools::validate_library(_library, skeleton, _schema);
-	if (issues.is_empty()) {
-		_log_line("Validation passed with no issues.", Color(0.5f, 1.0f, 0.6f));
-		return;
-	}
-	for (int i = 0; i < MIN(issues.size(), 40); i++) {
-		const Dictionary issue = issues[i];
-		const bool error = String(issue.get("severity", "warning")) == "error";
-		_log_line(vformat("[%s] %s %s", issue.get("severity", ""), issue.get("clip", ""),
-						issue.get("message", "")),
-				error ? Color(1, 0.5f, 0.4f) : Color(1, 0.85f, 0.4f));
-	}
-	if (issues.size() > 40) {
-		_log_line(vformat("...and %d more.", issues.size() - 40));
+void MotionMatchingEditorPlugin::_on_bottom_panel_toggled(bool p_visible) {
+	// Only react to the tab being opened -- hide_bottom_panel() above will
+	// itself fire this same signal with p_visible false right afterwards,
+	// which must be a no-op here or every open would immediately re-close.
+	if (p_visible) {
+		_on_fullscreen_pressed();
 	}
 }
 
-void MMDatabaseEditor::_on_build_pressed() {
-	Skeleton3D *skeleton = _resolve_skeleton();
-	if (skeleton == nullptr || _library.is_null()) {
+void MotionMatchingEditorPlugin::_on_fullscreen_window_close_requested() {
+	if (_fullscreen_window == nullptr || _panel == nullptr || _root == nullptr) {
 		return;
 	}
-	if (_schema.is_null()) {
-		_schema = MMFeatureSchema::make_default();
-	}
-
-	Ref<MMFeatureExtractor> extractor;
-	extractor.instantiate();
-	extractor->set_schema(_schema);
-	extractor->set_sample_rate((float)_sample_rate->get_value());
-	extractor->set_root_yaw_offset_degrees((float)_root_yaw_offset->get_value());
-
-	const String left_foot = _left_foot_override->get_text().strip_edges();
-	const String right_foot = _right_foot_override->get_text().strip_edges();
-	if (!left_foot.is_empty() || !right_foot.is_empty()) {
-		// Only these two roles are ever set by hand here -- everything else
-		// stays on auto-detect (the extractor's auto_detect_profile default
-		// is left untouched). MMSkeletonProfile locks a role the moment it is
-		// set explicitly and keeps it through every future auto_detect() call,
-		// so this survives rebuilds instead of being overwritten.
-		Ref<MMSkeletonProfile> profile;
-		profile.instantiate();
-		if (!left_foot.is_empty()) {
-			profile->set_bone_name(MM_BONE_LEFT_FOOT, left_foot);
-		}
-		if (!right_foot.is_empty()) {
-			profile->set_bone_name(MM_BONE_RIGHT_FOOT, right_foot);
-		}
-		extractor->set_profile(profile);
-	}
-
-	_database = extractor->build_database(skeleton, _library, _clip_settings);
-	_progress->set_value(1.0);
-
-	if (_database.is_null()) {
-		_log_line(
-				"Build failed. Check the Output/Debugger panel for a \"Skeleton profile "
-				"detection failed\" message -- this usually means the picked skeleton uses "
-				"bone names auto-detect could not recognize.",
-				Color(1, 0.5f, 0.4f));
-		return;
-	}
-
-	const Dictionary stats = _database->get_statistics();
-	_log_line(vformat("Built %s frames from %s clips, %s dimensions, %.1f MB of features.",
-					  stats["frame_count"], stats["animation_count"], stats["dimension"],
-					  (double)(int64_t)stats["feature_bytes"] / 1048576.0),
-			Color(0.5f, 1.0f, 0.6f));
+	_fullscreen_window->remove_child(_panel);
+	_root->add_child(_panel);
+	_root->move_child(_panel, 1); // Below the toolbar row, same as its original position.
+	_fullscreen_window->hide();
+	_fullscreen_button->set_visible(true);
 }
 
-void MMDatabaseEditor::_on_save_pressed() {
-	if (_database.is_null()) {
-		_log_line("Nothing to save yet. Press Build database first.", Color(1, 0.85f, 0.4f));
-		return;
-	}
-	if (_mm_resource.is_null()) {
-		_log_line("Assign a Motion Matching Resource above first -- the database always saves "
-				  "onto that resource's own database slot, never a separate guessed path.",
-				Color(1, 0.5f, 0.4f));
-		return;
-	}
-
-	// Always targets the SAME database this resource already points at (if
-	// it has one), overwriting it in place, so anything already wired up to
-	// that .res path -- a running scene, another resource referencing it --
-	// keeps working against the freshly built data without needing to be
-	// re-pointed. Only when there is no existing database yet is a new path
-	// chosen, next to the Motion Matching Resource itself.
-	String database_path;
-	if (_mm_resource->get_database().is_valid() && !_mm_resource->get_database()->get_path().is_empty()) {
-		database_path = _mm_resource->get_database()->get_path();
-	} else if (!_mm_resource->get_path().is_empty()) {
-		database_path = _mm_resource->get_path().get_base_dir().path_join("database.res");
-	} else {
-		_log_line(
-				"Save the Motion Matching Resource to disk first (from the Inspector), so there "
-				"is a folder to save the database next to.",
-				Color(1, 0.5f, 0.4f));
-		return;
-	}
-
-	_mm_resource->set_database(_database);
-
-	const Error error = ResourceSaver::get_singleton()->save(_database, database_path);
-	if (error != OK) {
-		_log_line(vformat("Save failed with error %d.", (int)error), Color(1, 0.5f, 0.4f));
-		return;
-	}
-
-	if (!_mm_resource->get_path().is_empty()) {
-		ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-	}
-
-	_log_line("Saved " + database_path, Color(0.5f, 1.0f, 0.6f));
-}
-
-void MMDatabaseEditor::_on_clip_edited() {
-	TreeItem *item = _clip_table->get_edited();
-	if (item == nullptr) {
-		return;
-	}
-	Dictionary settings = _clip_settings.get(item->get_text(0), Dictionary());
-	settings["tags"] = item->get_text(2).to_int();
-	settings["category"] = MMFeatureExtractor::guess_category_from_tags(settings["tags"]);
-	_clip_settings[item->get_text(0)] = settings;
-}
-
-void MMDatabaseEditor::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("_on_resource_picked", "resource"), &MMDatabaseEditor::_on_resource_picked);
-	ClassDB::bind_method(D_METHOD("_on_library_picked", "resource"), &MMDatabaseEditor::_on_library_picked);
-	ClassDB::bind_method(D_METHOD("_on_skeleton_path_changed", "text"), &MMDatabaseEditor::_on_skeleton_path_changed);
-	ClassDB::bind_method(D_METHOD("_on_skeleton_picker_pressed"), &MMDatabaseEditor::_on_skeleton_picker_pressed);
-	ClassDB::bind_method(D_METHOD("_on_skeleton_popup_selected", "index"), &MMDatabaseEditor::_on_skeleton_popup_selected);
-	ClassDB::bind_method(D_METHOD("_on_left_foot_override_changed", "text"), &MMDatabaseEditor::_on_left_foot_override_changed);
-	ClassDB::bind_method(D_METHOD("_on_right_foot_override_changed", "text"), &MMDatabaseEditor::_on_right_foot_override_changed);
-	ClassDB::bind_method(D_METHOD("_on_scan_pressed"), &MMDatabaseEditor::_on_scan_pressed);
-	ClassDB::bind_method(D_METHOD("_on_build_pressed"), &MMDatabaseEditor::_on_build_pressed);
-	ClassDB::bind_method(D_METHOD("_on_save_pressed"), &MMDatabaseEditor::_on_save_pressed);
-	ClassDB::bind_method(D_METHOD("_on_validate_pressed"), &MMDatabaseEditor::_on_validate_pressed);
-	ClassDB::bind_method(D_METHOD("_on_clip_edited"), &MMDatabaseEditor::_on_clip_edited);
+void MotionMatchingEditorPlugin::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("_on_fullscreen_pressed"), &MotionMatchingEditorPlugin::_on_fullscreen_pressed);
+	ClassDB::bind_method(D_METHOD("_on_fullscreen_window_close_requested"),
+			&MotionMatchingEditorPlugin::_on_fullscreen_window_close_requested);
+	ClassDB::bind_method(D_METHOD("_on_bottom_panel_toggled", "visible"),
+			&MotionMatchingEditorPlugin::_on_bottom_panel_toggled);
 }
 
 #endif // TOOLS_ENABLED
