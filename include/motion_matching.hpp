@@ -50,6 +50,16 @@ private:
 	// resource is opened, instead of living only in the dock's own LineEdit.
 	NodePath _skeleton_path;
 
+	// Optional manual overrides for just these two roles. Left empty, the
+	// extractor's auto-detect decides them like every other role; set by
+	// hand here (from the Database dock), MMSkeletonProfile locks them and
+	// keeps them through every future auto-detect pass -- these are the only
+	// two roles that commonly need a nudge (foot IK/contacts are sensitive to
+	// exactly which bone is "the foot"), so this stays two fields instead of
+	// the full 22-role manual mapping that used to live in the dock.
+	String _left_foot_override;
+	String _right_foot_override;
+
 	// Search settings.
 	float _search_interval = 0.0f; // 0 = evaluate every frame.
 	float _minimum_clip_time = 0.12f;
@@ -89,6 +99,8 @@ public:
 	Ref<MMCostFunction> get_cost_function() const { return _cost_function; }
 
 	MM_ACCESSORS(NodePath, skeleton_path)
+	MM_ACCESSORS(String, left_foot_override)
+	MM_ACCESSORS(String, right_foot_override)
 
 	MM_ACCESSORS(float, search_interval)
 	MM_ACCESSORS(float, minimum_clip_time)
