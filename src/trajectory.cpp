@@ -263,9 +263,23 @@ PackedFloat32Array MMTrajectory::get_debug_times() const {
 	return times;
 }
 
+PackedFloat32Array MMTrajectory::get_debug_confidences() const {
+	PackedFloat32Array confidences;
+	const float halflife = MAX(_confidence_halflife, 0.0001f);
+	for (int i = 0; i < _history.size(); i++) {
+		confidences.push_back(1.0f);
+	}
+	confidences.push_back(1.0f); // "now".
+	for (int i = 0; i < _future.size(); i++) {
+		confidences.push_back(Math::exp(-0.6931472f * _future[i].time / halflife));
+	}
+	return confidences;
+}
+
 void MMTrajectory::_bind_methods() {
 	MM_BIND_PROPERTY(MMTrajectory, Variant::FLOAT, halflife_position)
 	MM_BIND_PROPERTY(MMTrajectory, Variant::FLOAT, halflife_direction)
+	MM_BIND_PROPERTY(MMTrajectory, Variant::FLOAT, confidence_halflife)
 	MM_BIND_PROPERTY(MMTrajectory, Variant::FLOAT, prediction_step)
 	MM_BIND_PROPERTY(MMTrajectory, Variant::FLOAT, history_duration)
 	MM_BIND_PROPERTY(MMTrajectory, Variant::FLOAT, history_interval)
@@ -290,4 +304,5 @@ void MMTrajectory::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_debug_directions"), &MMTrajectory::get_debug_directions);
 	ClassDB::bind_method(D_METHOD("get_debug_velocities"), &MMTrajectory::get_debug_velocities);
 	ClassDB::bind_method(D_METHOD("get_debug_times"), &MMTrajectory::get_debug_times);
+	ClassDB::bind_method(D_METHOD("get_debug_confidences"), &MMTrajectory::get_debug_confidences);
 }
