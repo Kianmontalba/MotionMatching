@@ -129,6 +129,52 @@ void MMDebugTools::_on_refresh_pressed() {
 					(bool)candidate.get("right_foot_contact", false) ? "1" : "0"));
 		}
 	}
+
+	// Movement intent + accel/decel. Forward/right are relative to the
+	// character's own facing, not world space, so this reads the same
+	// regardless of which way the character happens to be pointed.
+	if (info.has("speed_current")) {
+		_readout->add_text("\nMovement:\n");
+		_readout->add_text(vformat("  Speed           %.2f -> %.2f m/s  (max %.2f)   accel %.2f m/s^2\n",
+				(double)info.get("speed_current", 0.0), (double)info.get("speed_desired", 0.0),
+				(double)info.get("speed_max", 0.0), (double)info.get("acceleration", 0.0)));
+		_readout->add_text(vformat("  Intent          forward %+.0f%%  right %+.0f%%  stop %.0f%%\n",
+				(double)info.get("intent_forward_percent", 0.0), (double)info.get("intent_right_percent", 0.0),
+				(double)info.get("intent_stop_percent", 0.0)));
+		_readout->add_text(vformat("  Turn intent     %+.1f deg\n", (double)info.get("turn_intent_degrees", 0.0)));
+		if ((bool)info.get("turn_in_place_needed", false)) {
+			_readout->push_color(Color(0.4f, 0.8f, 1.0f));
+			_readout->add_text("  Turn-in-place needed\n");
+			_readout->pop();
+		}
+	}
+
+	// One-tick-offset comparison -- see MotionMatchingController's field
+	// comments on _last_root_motion_delta for why this isn't same-instant.
+	_readout->add_text(vformat("\nRoot motion      %.4f m   actual movement %.4f m\n",
+			(double)info.get("root_motion_delta_length", 0.0),
+			(double)info.get("actual_movement_delta_length", 0.0)));
+
+	// Next foot-contact change within the clip actually playing right now.
+	const Dictionary footstep = controller->get_debug_footstep_timing();
+	if (footstep.has("next_left_change_seconds") || footstep.has("next_right_change_seconds")) {
+		_readout->add_text("\nNext footstep:\n");
+		if (footstep.has("next_left_change_seconds")) {
+			_readout->add_text(vformat("  Left            in %.2f s\n", (double)footstep["next_left_change_seconds"]));
+		}
+		if (footstep.has("next_right_change_seconds")) {
+			_readout->add_text(vformat("  Right           in %.2f s\n", (double)footstep["next_right_change_seconds"]));
+		}
+	}
+
+	// How many frames survive gameplay filtering (tags/category/speed)
+	// before any cost is even computed -- separate from frames_compared
+	// above, which is post-pruning inside the tree search.
+	const Dictionary filter_stats = controller->get_debug_filter_stats();
+	if (!filter_stats.is_empty()) {
+		_readout->add_text(vformat("\nFilter          %s / %s frames survive tags+category+speed\n",
+				filter_stats.get("after_filter", 0), filter_stats.get("total_frames", 0)));
+	}
 }
 
 void MMDebugTools::_bind_methods() {
