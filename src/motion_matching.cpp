@@ -803,6 +803,20 @@ Transform3D MotionMatchingController::consume_root_motion() {
 	return delta;
 }
 
+bool MotionMatchingController::get_current_left_foot_contact() const {
+	if (_database.is_null() || _current_frame < 0 || _current_frame >= _database->get_frame_count()) {
+		return false;
+	}
+	return (_database->get_frame_contacts_value(_current_frame) & 1) != 0;
+}
+
+bool MotionMatchingController::get_current_right_foot_contact() const {
+	if (_database.is_null() || _current_frame < 0 || _current_frame >= _database->get_frame_count()) {
+		return false;
+	}
+	return (_database->get_frame_contacts_value(_current_frame) & 2) != 0;
+}
+
 Dictionary MotionMatchingController::get_debug_info() const {
 	Dictionary info;
 	info["clip"] = _current_clip;
@@ -828,15 +842,8 @@ Dictionary MotionMatchingController::get_debug_info() const {
 	// wrote during database build (bit 0 = left, bit 1 = right). This is what
 	// MMFootIKModifier's contact-locking actually needs; without it the flags
 	// silently default to false regardless of the currently playing frame.
-	bool left_contact = false;
-	bool right_contact = false;
-	if (_database.is_valid() && _current_frame >= 0 && _current_frame < _database->get_frame_count()) {
-		const uint8_t contacts = _database->get_frame_contacts_value(_current_frame);
-		left_contact = (contacts & 1) != 0;
-		right_contact = (contacts & 2) != 0;
-	}
-	info["left_foot_contact"] = left_contact;
-	info["right_foot_contact"] = right_contact;
+	info["left_foot_contact"] = get_current_left_foot_contact();
+	info["right_foot_contact"] = get_current_right_foot_contact();
 
 	// Search-phase profiler report (frames_compared/candidates/nodes are
 	// covered above per-tick already; this is the ring-buffer summary —
@@ -976,6 +983,10 @@ void MotionMatchingController::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_root_motion"), &MotionMatchingController::get_root_motion);
 	ClassDB::bind_method(D_METHOD("consume_root_motion"), &MotionMatchingController::consume_root_motion);
 	ClassDB::bind_method(D_METHOD("get_debug_info"), &MotionMatchingController::get_debug_info);
+	ClassDB::bind_method(D_METHOD("get_current_left_foot_contact"),
+			&MotionMatchingController::get_current_left_foot_contact);
+	ClassDB::bind_method(D_METHOD("get_current_right_foot_contact"),
+			&MotionMatchingController::get_current_right_foot_contact);
 	ClassDB::bind_method(D_METHOD("get_debug_trajectory"), &MotionMatchingController::get_debug_trajectory);
 	ClassDB::bind_method(D_METHOD("get_debug_candidates", "count"),
 			&MotionMatchingController::get_debug_candidates, DEFVAL(3));
