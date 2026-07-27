@@ -246,6 +246,19 @@ private:
 	MMMatchResult _last_result;
 	float _continuation_cost = 0.0f;
 
+	// Debug-only: root motion vs. actual character movement. Populated by
+	// consume_root_motion() (the delta the animation produced) and by
+	// update() (the character's actual world-position change since the
+	// previous update() call). The two are one tick offset from each other
+	// -- the game applies the consumed delta sometime after this frame's
+	// update() runs -- so this is a same-tick-length comparison, not a
+	// same-instant one; close enough to show a mismatch (a wall blocking
+	// root motion, warp altering it, and so on), not exact frame alignment.
+	Vector3 _last_root_motion_delta;
+	Vector3 _last_actual_movement_delta;
+	Vector3 _previous_character_position;
+	bool _has_previous_character_position = false;
+
 	void _sync_from_resource();
 	void _bind_animation_tree();
 	bool _bind_animation_node(const Ref<AnimationNode> &p_node);
@@ -353,6 +366,17 @@ public:
 	// cost, as a percentage -- e.g. {"pose_position": 40.0, "trajectory_position":
 	// 35.0, ...}. Empty if nothing has matched yet.
 	Dictionary get_debug_cost_breakdown() const;
+
+	// Debug-only: next foot-contact change within the CURRENTLY PLAYING
+	// clip (not future trajectory points, whose clip hasn't been chosen
+	// yet). {"next_left_change_seconds": ..., "next_right_change_seconds":
+	// ...}; a key is absent if no change is found within the look-ahead
+	// horizon or the clip ends first.
+	Dictionary get_debug_footstep_timing() const;
+
+	// Debug-only: total vs. filter-surviving frame count for the filter the
+	// most recent search used -- see MMPoseSearch::count_filtered_frames_debug_raw().
+	Dictionary get_debug_filter_stats() const;
 
 	// ---- Optional subsystems, opt-in by assignment ----
 
