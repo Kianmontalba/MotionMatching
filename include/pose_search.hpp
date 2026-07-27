@@ -113,6 +113,16 @@ public:
 	// search_query()'s tag/category encoding.
 	Array search_top_candidates_debug(const PackedFloat32Array &p_query, const Ref<MMCostFunction> &p_cost,
 			int p_required_tags, int p_blocked_tags, int p_category_mask, int p_count) const;
+
+	// Debug-only: total frame count vs how many survive tag/category/speed
+	// filtering, before any cost is computed at all. Answers "why did
+	// filtering leave so few options" independently of the query itself.
+	// Cheap per frame (no float math), but still O(frame_count) -- fine for
+	// a debug panel, not the hot search path.
+	Dictionary count_filtered_frames_debug_raw(const MMSearchFilter &p_filter) const;
+
+	// Scriptable wrapper for count_filtered_frames_debug_raw().
+	Dictionary count_filtered_frames_debug(int p_required_tags, int p_blocked_tags, int p_category_mask) const;
 };
 
 } // namespace godot
