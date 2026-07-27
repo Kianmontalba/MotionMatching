@@ -409,6 +409,34 @@ Array MMPoseSearch::search_top_candidates_debug(const PackedFloat32Array &p_quer
 	return search_top_candidates_debug_raw(p_query.ptr(), p_cost, filter, p_count);
 }
 
+Dictionary MMPoseSearch::count_filtered_frames_debug_raw(const MMSearchFilter &p_filter) const {
+	Dictionary result;
+	if (_database.is_null()) {
+		return result;
+	}
+
+	const int total = _database->get_frame_count();
+	int accepted = 0;
+	for (int frame = 0; frame < total; frame++) {
+		if (p_filter.accepts(_database->get_frame_tag_mask(frame), _database->get_frame_category_id(frame),
+					_database->get_frame_speed_value(frame))) {
+			accepted++;
+		}
+	}
+	result["total_frames"] = total;
+	result["after_filter"] = accepted;
+	return result;
+}
+
+Dictionary MMPoseSearch::count_filtered_frames_debug(int p_required_tags, int p_blocked_tags,
+		int p_category_mask) const {
+	MMSearchFilter filter;
+	filter.required_tags = (uint32_t)p_required_tags;
+	filter.blocked_tags = (uint32_t)p_blocked_tags;
+	filter.category_mask = (uint32_t)p_category_mask;
+	return count_filtered_frames_debug_raw(filter);
+}
+
 void MMPoseSearch::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("build", "database"), &MMPoseSearch::build);
 	ClassDB::bind_method(D_METHOD("clear"), &MMPoseSearch::clear);
@@ -425,6 +453,9 @@ void MMPoseSearch::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("search_top_candidates_debug", "query", "cost", "required_tags",
 								 "blocked_tags", "category_mask", "count"),
 			&MMPoseSearch::search_top_candidates_debug);
+	ClassDB::bind_method(D_METHOD("count_filtered_frames_debug", "required_tags", "blocked_tags",
+								 "category_mask"),
+			&MMPoseSearch::count_filtered_frames_debug);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "leaf_size"), "set_leaf_size", "get_leaf_size");
 }
