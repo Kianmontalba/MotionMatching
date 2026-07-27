@@ -89,8 +89,20 @@ MMDatabaseEditor::MMDatabaseEditor() {
 
 	_skeleton_path = memnew(MMNodePathField);
 	_skeleton_path->set_text("%GeneralSkeleton");
-	_skeleton_path->set_placeholder("Node path to the Skeleton3D -- type it, or drag the node in from the Scene dock");
-	mm_add_row(this, "Skeleton node path", _skeleton_path);
+	_skeleton_path->set_placeholder("Type a path, drag a node in from the Scene dock, or use Pick...");
+	_skeleton_path->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+
+	_skeleton_picker_button = memnew(Button);
+	_skeleton_picker_button->set_text("Pick...");
+	_skeleton_picker_button->set_tooltip_text("Browse every Skeleton3D node in the current scene");
+
+	HBoxContainer *skeleton_row = memnew(HBoxContainer);
+	skeleton_row->add_child(_skeleton_path);
+	skeleton_row->add_child(_skeleton_picker_button);
+	mm_add_row(this, "Skeleton node path", skeleton_row);
+
+	_skeleton_popup = memnew(PopupMenu);
+	add_child(_skeleton_popup);
 
 	// Backed by the resource above, not a typed-in path: picking (or
 	// dropping) a library here writes it straight onto the Motion Matching
@@ -100,48 +112,6 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_library_picker = memnew(EditorResourcePicker);
 	_library_picker->set_base_type("AnimationLibrary");
 	mm_add_row(this, "Animation library", _library_picker);
-
-	_auto_detect_profile = memnew(CheckBox);
-	_auto_detect_profile->set_text("Auto-detect skeleton profile");
-	_auto_detect_profile->set_pressed(true);
-	add_child(_auto_detect_profile);
-
-	_load_bones_button = memnew(Button);
-	_load_bones_button->set_text("Load bones from skeleton");
-	_load_bones_button->set_visible(false);
-	add_child(_load_bones_button);
-
-	// One row per MMBoneRole, in enum order. Each "Bone" cell becomes a
-	// dropdown (CELL_MODE_RANGE) once Load bones from skeleton fills in the
-	// option list; empty text on that column, and no dropdown, until then --
-	// there is nothing to pick from before a skeleton has been resolved.
-	_bone_mapping_tree = memnew(Tree);
-	_bone_mapping_tree->set_columns(2);
-	_bone_mapping_tree->set_column_titles_visible(true);
-	_bone_mapping_tree->set_column_title(0, "Role");
-	_bone_mapping_tree->set_column_title(1, "Bone");
-	_bone_mapping_tree->set_custom_minimum_size(Vector2(0, 220));
-	_bone_mapping_tree->set_visible(false);
-	{
-		static const char *role_labels[] = {
-			"Root", "Pelvis", "Spine", "Chest", "Neck", "Head",
-			"Left Upper Leg", "Left Lower Leg", "Left Foot", "Left Toe",
-			"Right Upper Leg", "Right Lower Leg", "Right Foot", "Right Toe",
-			"Left Shoulder", "Left Upper Arm", "Left Lower Arm", "Left Hand",
-			"Right Shoulder", "Right Upper Arm", "Right Lower Arm", "Right Hand"
-		};
-		TreeItem *root = _bone_mapping_tree->create_item();
-		_bone_mapping_tree->set_hide_root(true);
-		for (int i = 0; i < MM_BONE_ROLE_MAX; i++) {
-			TreeItem *item = _bone_mapping_tree->create_item(root);
-			item->set_text(0, role_labels[i]);
-			item->set_cell_mode(1, TreeItem::CELL_MODE_RANGE);
-			item->set_editable(1, true);
-			item->set_text(1, "(none)");
-			item->set_range(1, 0);
-		}
-	}
-	add_child(_bone_mapping_tree);
 
 	_sample_rate = memnew(SpinBox);
 	_sample_rate->set_min(10);
@@ -155,6 +125,14 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_root_yaw_offset->set_step(1);
 	_root_yaw_offset->set_value(0);
 	mm_add_row(this, "Root yaw offset (degrees)", _root_yaw_offset);
+
+	_left_foot_override = memnew(LineEdit);
+	_left_foot_override->set_placeholder("Leave empty to auto-detect");
+	mm_add_row(this, "Left foot bone (override)", _left_foot_override);
+
+	_right_foot_override = memnew(LineEdit);
+	_right_foot_override->set_placeholder("Leave empty to auto-detect");
+	mm_add_row(this, "Right foot bone (override)", _right_foot_override);
 
 	HBoxContainer *buttons = memnew(HBoxContainer);
 	_scan_button = memnew(Button);
@@ -198,8 +176,10 @@ void MMDatabaseEditor::_ready() {
 	_resource_picker->connect("resource_changed", Callable(this, "_on_resource_picked"));
 	_library_picker->connect("resource_changed", Callable(this, "_on_library_picked"));
 	_skeleton_path->connect("text_changed", Callable(this, "_on_skeleton_path_changed"));
-	_auto_detect_profile->connect("toggled", Callable(this, "_on_auto_detect_toggled"));
-	_load_bones_button->connect("pressed", Callable(this, "_on_load_bones_pressed"));
+	_skeleton_picker_button->connect("pressed", Callable(this, "_on_skeleton_picker_pressed"));
+	_skeleton_popup->connect("index_pressed", Callable(this, "_on_skeleton_popup_selected"));
+	_left_foot_override->connect("text_changed", Callable(this, "_on_left_foot_override_changed"));
+	_right_foot_override->connect("text_changed", Callable(this, "_on_right_foot_override_changed"));
 	_scan_button->connect("pressed", Callable(this, "_on_scan_pressed"));
 	_build_button->connect("pressed", Callable(this, "_on_build_pressed"));
 	_save_button->connect("pressed", Callable(this, "_on_save_pressed"));
@@ -246,6 +226,8 @@ void MMDatabaseEditor::_on_resource_picked(const Ref<Resource> &p_resource) {
 	if (!_mm_resource->get_skeleton_path().is_empty()) {
 		_skeleton_path->set_text(String(_mm_resource->get_skeleton_path()));
 	}
+	_left_foot_override->set_text(_mm_resource->get_left_foot_override());
+	_right_foot_override->set_text(_mm_resource->get_right_foot_override());
 
 	if (_library.is_valid()) {
 		_clip_settings = MMAnimationLibraryTools::auto_tag_library(_library);
@@ -314,6 +296,39 @@ void MMDatabaseEditor::_on_skeleton_path_changed(const String &p_text) {
 	}
 }
 
+void MMDatabaseEditor::_on_left_foot_override_changed(const String &p_text) {
+	if (_mm_resource.is_null()) {
+		return;
+	}
+	// Same persist-immediately pattern as _on_skeleton_path_changed().
+	_mm_resource->set_left_foot_override(p_text);
+	if (_mm_resource->get_path().is_empty()) {
+		return;
+	}
+	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
+	if (error != OK) {
+		_log_line(vformat("Could not save the left foot override back to %s (error %d).",
+							_mm_resource->get_path(), (int)error),
+				Color(1, 0.5f, 0.4f));
+	}
+}
+
+void MMDatabaseEditor::_on_right_foot_override_changed(const String &p_text) {
+	if (_mm_resource.is_null()) {
+		return;
+	}
+	_mm_resource->set_right_foot_override(p_text);
+	if (_mm_resource->get_path().is_empty()) {
+		return;
+	}
+	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
+	if (error != OK) {
+		_log_line(vformat("Could not save the right foot override back to %s (error %d).",
+							_mm_resource->get_path(), (int)error),
+				Color(1, 0.5f, 0.4f));
+	}
+}
+
 void MMDatabaseEditor::_on_scan_pressed() {
 	// Re-reads whatever is currently assigned rather than a remembered path,
 	// so pressing Scan after e.g. calling refresh_all() on an
@@ -350,49 +365,55 @@ void MMDatabaseEditor::_populate_table() {
 	}
 }
 
-void MMDatabaseEditor::_on_auto_detect_toggled(bool p_pressed) {
-	_load_bones_button->set_visible(!p_pressed);
-	_bone_mapping_tree->set_visible(!p_pressed);
+void MMDatabaseEditor::_collect_skeletons(Node *p_node, Node *p_scene_root) {
+	if (Object::cast_to<Skeleton3D>(p_node) != nullptr) {
+		// Stored relative to the scene root, same convention _resolve_skeleton()
+		// and the drag-and-drop path already use -- so picking one here writes
+		// exactly the same kind of path a drop or a hand-typed one would.
+		_skeleton_candidates.push_back(String(p_scene_root->get_path_to(p_node)));
+	}
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		_collect_skeletons(p_node->get_child(i), p_scene_root);
+	}
 }
 
-void MMDatabaseEditor::_on_load_bones_pressed() {
-	Skeleton3D *skeleton = _resolve_skeleton();
-	if (skeleton == nullptr) {
+void MMDatabaseEditor::_on_skeleton_picker_pressed() {
+	Node *scene_root = EditorInterface::get_singleton()->get_edited_scene_root();
+	if (scene_root == nullptr) {
+		_log_line("No scene is open.", Color(1, 0.5f, 0.4f));
 		return;
 	}
 
-	_bone_names_cache = skeleton->get_concatenated_bone_names().split(",");
-	// Index 0 is always "leave this role unmapped" -- a rig missing a role
-	// entirely (no tail bones, no toes, ...) is normal, not an error.
-	_bone_names_cache.insert(0, "(none)");
+	_skeleton_candidates.clear();
+	_collect_skeletons(scene_root, scene_root);
 
-	const String option_list = String(",").join(_bone_names_cache);
-	TreeItem *item = _bone_mapping_tree->get_root() != nullptr ? _bone_mapping_tree->get_root()->get_first_child() : nullptr;
-	while (item != nullptr) {
-		item->set_text(1, option_list);
-		item->set_range(1, 0);
-		item = item->get_next();
+	if (_skeleton_candidates.is_empty()) {
+		_log_line("No Skeleton3D node found in the current scene.", Color(1, 0.85f, 0.4f));
+		return;
 	}
 
-	_log_line(vformat("Loaded %d bones from %s.", _bone_names_cache.size() - 1, skeleton->get_name()),
-			Color(0.5f, 1.0f, 0.6f));
+	_skeleton_popup->clear();
+	for (int i = 0; i < _skeleton_candidates.size(); i++) {
+		_skeleton_popup->add_item(_skeleton_candidates[i]);
+	}
+
+	// Dropped right under the button, the same place any other editor popup
+	// (like an OptionButton) would open.
+	const Rect2 button_rect = _skeleton_picker_button->get_screen_rect();
+	_skeleton_popup->set_position(Vector2i(button_rect.position.x, button_rect.position.y + button_rect.size.y));
+	_skeleton_popup->popup();
 }
 
-Ref<MMSkeletonProfile> MMDatabaseEditor::_build_manual_profile() const {
-	Ref<MMSkeletonProfile> profile;
-	profile.instantiate();
-
-	TreeItem *item = _bone_mapping_tree->get_root() != nullptr ? _bone_mapping_tree->get_root()->get_first_child() : nullptr;
-	int role = 0;
-	while (item != nullptr && role < MM_BONE_ROLE_MAX) {
-		const int index = (int)item->get_range(1);
-		if (index > 0 && index < _bone_names_cache.size()) {
-			profile->set_bone_name(role, _bone_names_cache[index]);
-		}
-		item = item->get_next();
-		role++;
+void MMDatabaseEditor::_on_skeleton_popup_selected(int p_index) {
+	if (p_index < 0 || p_index >= _skeleton_candidates.size()) {
+		return;
 	}
-	return profile;
+	_skeleton_path->set_text(_skeleton_candidates[p_index]);
+	// MMNodePathField's own text_changed signal only fires on user typing,
+	// not on a programmatic set_text() -- so this mirrors what dropping a
+	// node already does, calling the same handler directly to persist the
+	// pick onto the resource immediately.
+	_on_skeleton_path_changed(_skeleton_candidates[p_index]);
 }
 
 void MMDatabaseEditor::_on_validate_pressed() {
@@ -436,9 +457,23 @@ void MMDatabaseEditor::_on_build_pressed() {
 	extractor->set_sample_rate((float)_sample_rate->get_value());
 	extractor->set_root_yaw_offset_degrees((float)_root_yaw_offset->get_value());
 
-	if (!_auto_detect_profile->is_pressed()) {
-		extractor->set_auto_detect_profile(false);
-		extractor->set_profile(_build_manual_profile());
+	const String left_foot = _left_foot_override->get_text().strip_edges();
+	const String right_foot = _right_foot_override->get_text().strip_edges();
+	if (!left_foot.is_empty() || !right_foot.is_empty()) {
+		// Only these two roles are ever set by hand here -- everything else
+		// stays on auto-detect (the extractor's auto_detect_profile default
+		// is left untouched). MMSkeletonProfile locks a role the moment it is
+		// set explicitly and keeps it through every future auto_detect() call,
+		// so this survives rebuilds instead of being overwritten.
+		Ref<MMSkeletonProfile> profile;
+		profile.instantiate();
+		if (!left_foot.is_empty()) {
+			profile->set_bone_name(MM_BONE_LEFT_FOOT, left_foot);
+		}
+		if (!right_foot.is_empty()) {
+			profile->set_bone_name(MM_BONE_RIGHT_FOOT, right_foot);
+		}
+		extractor->set_profile(profile);
 	}
 
 	_database = extractor->build_database(skeleton, _library, _clip_settings);
@@ -446,9 +481,9 @@ void MMDatabaseEditor::_on_build_pressed() {
 
 	if (_database.is_null()) {
 		_log_line(
-				"Build failed. If \"Auto-detect skeleton profile\" is on, check the Output/"
-				"Debugger panel for a \"Skeleton profile detection failed\" message -- or turn "
-				"it off and map bones manually below instead.",
+				"Build failed. Check the Output/Debugger panel for a \"Skeleton profile "
+				"detection failed\" message -- this usually means the picked skeleton uses "
+				"bone names auto-detect could not recognize.",
 				Color(1, 0.5f, 0.4f));
 		return;
 	}
@@ -521,8 +556,10 @@ void MMDatabaseEditor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_resource_picked", "resource"), &MMDatabaseEditor::_on_resource_picked);
 	ClassDB::bind_method(D_METHOD("_on_library_picked", "resource"), &MMDatabaseEditor::_on_library_picked);
 	ClassDB::bind_method(D_METHOD("_on_skeleton_path_changed", "text"), &MMDatabaseEditor::_on_skeleton_path_changed);
-	ClassDB::bind_method(D_METHOD("_on_auto_detect_toggled", "pressed"), &MMDatabaseEditor::_on_auto_detect_toggled);
-	ClassDB::bind_method(D_METHOD("_on_load_bones_pressed"), &MMDatabaseEditor::_on_load_bones_pressed);
+	ClassDB::bind_method(D_METHOD("_on_skeleton_picker_pressed"), &MMDatabaseEditor::_on_skeleton_picker_pressed);
+	ClassDB::bind_method(D_METHOD("_on_skeleton_popup_selected", "index"), &MMDatabaseEditor::_on_skeleton_popup_selected);
+	ClassDB::bind_method(D_METHOD("_on_left_foot_override_changed", "text"), &MMDatabaseEditor::_on_left_foot_override_changed);
+	ClassDB::bind_method(D_METHOD("_on_right_foot_override_changed", "text"), &MMDatabaseEditor::_on_right_foot_override_changed);
 	ClassDB::bind_method(D_METHOD("_on_scan_pressed"), &MMDatabaseEditor::_on_scan_pressed);
 	ClassDB::bind_method(D_METHOD("_on_build_pressed"), &MMDatabaseEditor::_on_build_pressed);
 	ClassDB::bind_method(D_METHOD("_on_save_pressed"), &MMDatabaseEditor::_on_save_pressed);
