@@ -43,6 +43,12 @@ private:
 	Ref<MotionMatchingDatabase> _database;
 	Ref<MMFeatureSchema> _schema;
 	Ref<MMCostFunction> _cost_function;
+	// Path (relative to the scene this resource is used in) to the
+	// Skeleton3D the database editor should build against. Stored on the
+	// resource itself, same as animation_library, so a node picked -- or
+	// dropped -- in the Database dock is still there the next time this
+	// resource is opened, instead of living only in the dock's own LineEdit.
+	NodePath _skeleton_path;
 
 	// Search settings.
 	float _search_interval = 0.0f; // 0 = evaluate every frame.
@@ -81,6 +87,8 @@ public:
 
 	void set_cost_function(const Ref<MMCostFunction> &p_cost);
 	Ref<MMCostFunction> get_cost_function() const { return _cost_function; }
+
+	MM_ACCESSORS(NodePath, skeleton_path)
 
 	MM_ACCESSORS(float, search_interval)
 	MM_ACCESSORS(float, minimum_clip_time)
