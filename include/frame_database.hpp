@@ -72,6 +72,11 @@ class MotionMatchingDatabase : public Resource {
 	GDCLASS(MotionMatchingDatabase, Resource);
 
 private:
+	// What shows up in the dock and in MMBoxAnimation's list -- "Walk",
+	// "Sprint", "Jump", "Traversal", whatever this one database is for.
+	// Purely a label; nothing here reads it to decide behavior.
+	String _name;
+
 	Ref<MMFeatureSchema> _schema;
 	TypedArray<MMAnimationEntry> _animations;
 
@@ -100,11 +105,18 @@ protected:
 	static void _bind_methods();
 
 public:
+	MM_ACCESSORS(String, name)
+
 	void set_schema(const Ref<MMFeatureSchema> &p_schema);
 	Ref<MMFeatureSchema> get_schema() const { return _schema; }
 
 	void set_animations(const TypedArray<MMAnimationEntry> &p_animations);
 	TypedArray<MMAnimationEntry> get_animations() const { return _animations; }
+
+	// Sets loop on every MMAnimationEntry this database holds in one call,
+	// instead of clicking through each entry in the clip table. The database
+	// handles this itself -- entries never reach back up to ask for it.
+	void set_all_loop(bool p_loop);
 
 	MM_ACCESSORS(float, sample_rate)
 
