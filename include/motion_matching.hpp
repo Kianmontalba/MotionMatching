@@ -5,6 +5,7 @@
 #include "cost_function.hpp"
 #include "feature.hpp"
 #include "frame_database.hpp"
+#include "mm_extra_database.hpp"
 #include "motion_warping.hpp"
 #include "pose_search.hpp"
 #include "profiler.hpp"
@@ -40,7 +41,13 @@ class MotionMatchingResource : public Resource {
 
 private:
 	Ref<AnimationLibrary> _animation_library;
-	Ref<MotionMatchingDatabase> _database;
+	// Was a single Ref<MotionMatchingDatabase>. Now an MMExtraDatabase --
+	// an add-only list of MMBoxAnimation (one per weapon/character set,
+	// e.g. "Normal Rifle", "Pistol", "Zombie"), each an add-only list of
+	// named MotionMatchingDatabase entries ("Walk", "Sprint", "Jump", ...).
+	// Exactly one of those still runs at a time -- see
+	// MMExtraDatabase::get_active_database().
+	Ref<MMExtraDatabase> _database;
 	Ref<MMFeatureSchema> _schema;
 	Ref<MMCostFunction> _cost_function;
 	// Path (relative to the scene this resource is used in) to the
@@ -89,8 +96,8 @@ public:
 	void set_animation_library(const Ref<AnimationLibrary> &p_library);
 	Ref<AnimationLibrary> get_animation_library() const { return _animation_library; }
 
-	void set_database(const Ref<MotionMatchingDatabase> &p_database);
-	Ref<MotionMatchingDatabase> get_database() const { return _database; }
+	void set_database(const Ref<MMExtraDatabase> &p_database);
+	Ref<MMExtraDatabase> get_database() const { return _database; }
 
 	void set_schema(const Ref<MMFeatureSchema> &p_schema);
 	Ref<MMFeatureSchema> get_schema() const { return _schema; }
