@@ -26,8 +26,8 @@ private:
 	// Which box/database inside it the controller actually searches against
 	// right now. Indices, not object pointers, so the choice survives a
 	// .tres round trip. Only ever one database is active at a time.
-	int _active_box = 0;
-	int _active_database = 0;
+	int _active_box_index = 0;
+	int _active_database_index = 0;
 
 protected:
 	static void _bind_methods();
@@ -45,10 +45,10 @@ public:
 	Ref<MMBoxAnimation> get_box(int p_index) const;
 	Ref<MMBoxAnimation> find_box(const String &p_name) const;
 
-	MM_ACCESSORS(int, active_box)
-	MM_ACCESSORS(int, active_database)
+	MM_ACCESSORS(int, active_box_index)
+	MM_ACCESSORS(int, active_database_index)
 
-	// Whichever single database _active_box/_active_database currently point
+	// Whichever single database _active_box_index/_active_database_index currently point
 	// at -- this is what the controller runs its search against. Null if
 	// nothing has been added yet.
 	Ref<MotionMatchingDatabase> get_active_database() const;
