@@ -2,6 +2,8 @@
 
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 using namespace godot;
 
@@ -76,24 +78,48 @@ void MMDebugDraw::_draw_arrow(const Vector3 &p_from, const Vector3 &p_direction,
 	_draw_line(tip, back - side, p_color);
 }
 
+void MMDebugDraw::_ensure_label_pool(int p_count) {
+	while (_label_pool.size() < p_count) {
+		Label3D *label = memnew(Label3D);
+		label->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+		label->set_no_depth_test(true);
+		label->set_font_size(_label_font_size);
+		label->set_modulate(_label_color);
+		add_child(label);
+		_label_pool.push_back(label);
+	}
+}
+
+void MMDebugDraw::_hide_labels_from(int p_visible_count) {
+	for (int i = p_visible_count; i < _label_pool.size(); i++) {
+		_label_pool[i]->set_visible(false);
+	}
+}
+
 void MMDebugDraw::_process(double p_delta) {
 	_mesh->clear_surfaces();
 	MotionMatchingController *controller = _resolve_controller();
 	if (controller == nullptr || !_draw_trajectory) {
+		_hide_labels_from(0);
 		return;
 	}
 
 	const PackedVector3Array points = controller->get_debug_trajectory();
 	if (points.size() < 2) {
+		_hide_labels_from(0);
 		return;
 	}
 
 	Ref<MMTrajectory> trajectory = controller->get_trajectory();
-	// Paired 1:1 with points -- same history-then-current-then-future order,
-	// same length -- so index i's direction is always index i's own forward
-	// arrow, history samples included, not just the predicted ones.
+	// All three of these are paired 1:1 with points -- same
+	// history-then-current-then-future order, same length -- so index i's
+	// direction/velocity/time is always index i's own point.
 	const PackedVector3Array directions = trajectory.is_valid() ? trajectory->get_debug_directions()
 																  : PackedVector3Array();
+	const PackedVector3Array velocities = trajectory.is_valid() ? trajectory->get_debug_velocities()
+																  : PackedVector3Array();
+	const PackedFloat32Array times = trajectory.is_valid() ? trajectory->get_debug_times()
+															 : PackedFloat32Array();
 
 	_mesh->surface_begin(Mesh::PRIMITIVE_LINES, _material);
 
@@ -110,10 +136,18 @@ void MMDebugDraw::_process(double p_delta) {
 		_draw_line(inverse.xform(points[i] + lift), inverse.xform(points[i + 1] + lift), color);
 	}
 
+	if (_draw_frame_labels) {
+		_ensure_label_pool(points.size());
+	}
+
 	// Every sample gets a circle, and -- per the reference spec -- every
 	// circle gets its own forward arrow, not just the predicted half of the
 	// line. History circles use _history_color, current and future use
-	// _future_color, same split the line above already uses.
+	// _future_color, same split the line above already uses. The velocity
+	// arrow is drawn alongside the facing arrow rather than instead of it:
+	// during a straight run the two overlap and nothing is lost, but during
+	// a strafe, a dodge, or a fast swing they visibly split apart, which is
+	// the whole point of drawing both.
 	for (int i = 0; i < points.size(); i++) {
 		const Color color = i < split ? _history_color : _future_color;
 		const Vector3 local_point = inverse.xform(points[i] + lift);
@@ -123,6 +157,31 @@ void MMDebugDraw::_process(double p_delta) {
 			const Vector3 local_direction = inverse.basis.xform(directions[i]);
 			_draw_arrow(local_point, local_direction, _forward_arrow_length, color);
 		}
+
+		if (_draw_velocity && i < velocities.size()) {
+			const Vector3 local_velocity = inverse.basis.xform(velocities[i]);
+			const float speed = local_velocity.length();
+			const float arrow_length = MIN(speed * _velocity_arrow_scale, _velocity_arrow_max_length);
+			if (arrow_length > 0.001f) {
+				_draw_arrow(local_point, local_velocity, arrow_length, _velocity_color);
+			}
+		}
+
+		if (_draw_frame_labels && i < _label_pool.size()) {
+			Label3D *label = _label_pool[i];
+			label->set_visible(true);
+			label->set_position(local_point + Vector3(0, _label_height_offset, 0));
+			label->set_modulate(_label_color);
+			label->set_font_size(_label_font_size);
+			const float time = i < times.size() ? times[i] : 0.0f;
+			label->set_text(vformat("%d | %+.2fs", i, time));
+		}
+	}
+
+	if (_draw_frame_labels) {
+		_hide_labels_from(points.size());
+	} else {
+		_hide_labels_from(0);
 	}
 
 	_mesh->surface_end();
@@ -138,10 +197,18 @@ void MMDebugDraw::_bind_methods() {
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::BOOL, draw_trajectory)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::BOOL, draw_matched_trajectory)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::BOOL, draw_facing)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::BOOL, draw_velocity)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::BOOL, draw_frame_labels)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, marker_size)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, floor_offset)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, forward_arrow_length)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, velocity_arrow_scale)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, velocity_arrow_max_length)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::FLOAT, label_height_offset)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::INT, label_font_size)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, history_color)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, future_color)
 	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, matched_color)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, velocity_color)
+	MM_BIND_PROPERTY(MMDebugDraw, Variant::COLOR, label_color)
 }
