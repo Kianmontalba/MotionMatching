@@ -32,6 +32,13 @@ private:
 
 	float _halflife_position = 0.12f;
 	float _halflife_direction = 0.10f;
+	// How quickly prediction confidence decays with time. Not a measured
+	// accuracy -- there is no ground truth for a future that hasn't happened
+	// -- but a principled stand-in: the further out a sample is, the more
+	// time the player has to change their mind before it, so confidence in
+	// it should fall the same way the spring's own correction would if the
+	// target moved right now. At t == this halflife, confidence is 50%.
+	float _confidence_halflife = 0.5f;
 	float _prediction_step = 1.0f / 60.0f;
 	float _history_duration = 0.6f;
 	float _history_interval = 0.1f;
@@ -66,6 +73,7 @@ public:
 
 	MM_ACCESSORS(float, halflife_position)
 	MM_ACCESSORS(float, halflife_direction)
+	MM_ACCESSORS(float, confidence_halflife)
 	MM_ACCESSORS(float, prediction_step)
 	MM_ACCESSORS(float, history_duration)
 	MM_ACCESSORS(float, history_interval)
@@ -111,6 +119,11 @@ public:
 	// arrays so a debug draw can label every point with the time (and, by
 	// index, the trajectory sample slot) that fed the feature vector.
 	PackedFloat32Array get_debug_times() const;
+	// 0-1 confidence per point, paired 1:1 with the arrays above. History
+	// and "now" are always 1.0 (they already happened); future points decay
+	// with time per _confidence_halflife -- see the field comment for what
+	// this is and, as importantly, is not.
+	PackedFloat32Array get_debug_confidences() const;
 };
 
 } // namespace godot
