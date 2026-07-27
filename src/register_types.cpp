@@ -9,6 +9,8 @@
 #include "feature_extractor.hpp"
 #include "frame_database.hpp"
 #include "ik_system.hpp"
+#include "mm_box_animation.hpp"
+#include "mm_extra_database.hpp"
 #include "motion_matching.hpp"
 #include "motion_warping.hpp"
 #include "pose_search.hpp"
@@ -36,6 +38,8 @@ void initialize_motion_matching_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(MMFeatureSchema);
 		GDREGISTER_CLASS(MMAnimationEntry);
 		GDREGISTER_CLASS(MotionMatchingDatabase);
+		GDREGISTER_CLASS(MMBoxAnimation);
+		GDREGISTER_CLASS(MMExtraDatabase);
 
 		// Rig and clip analysis.
 		GDREGISTER_CLASS(MMSkeletonProfile);
