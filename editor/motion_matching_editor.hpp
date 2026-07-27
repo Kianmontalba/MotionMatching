@@ -20,6 +20,7 @@
 #include <godot_cpp/classes/label.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/option_button.hpp>
+#include <godot_cpp/classes/popup_menu.hpp>
 #include <godot_cpp/classes/progress_bar.hpp>
 #include <godot_cpp/classes/rich_text_label.hpp>
 #include <godot_cpp/classes/spin_box.hpp>
@@ -61,6 +62,24 @@ class MMDatabaseEditor : public VBoxContainer {
 
 private:
 	MMNodePathField *_skeleton_path = nullptr;
+	// Lets the user browse every Skeleton3D actually present in the current
+	// scene instead of typing a path or having to drag the node in from the
+	// Scene dock. Pressing it fills _skeleton_popup with one entry per
+	// Skeleton3D found, and picking one writes straight into _skeleton_path
+	// (same as typing or dropping would).
+	Button *_skeleton_picker_button = nullptr;
+	PopupMenu *_skeleton_popup = nullptr;
+	PackedStringArray _skeleton_candidates;
+
+	// Two optional manual overrides -- everything else always comes from
+	// auto-detect. Left empty (the common case), auto-detect decides these
+	// same as any other role. Filled in, MMSkeletonProfile locks just these
+	// two and keeps them through every future auto-detect pass, which is
+	// what makes them survive a rebuild instead of resetting.
+	LineEdit *_left_foot_override = nullptr;
+	LineEdit *_right_foot_override = nullptr;
+	void _on_left_foot_override_changed(const String &p_text);
+	void _on_right_foot_override_changed(const String &p_text);
 	// The dock's anchor: whichever MotionMatchingResource the user is
 	// preparing. Everything else here reads from and writes back to this
 	// same resource (and, in turn, its own path on disk) instead of holding
@@ -82,18 +101,9 @@ private:
 	Tree *_clip_table = nullptr;
 	RichTextLabel *_log = nullptr;
 
-	// Manual bone-role mapping, for rigs auto_detect() cannot read (unusual
-	// naming, a non-humanoid skeleton, ...). Off (auto-detect on) by default;
-	// switching it on reveals one dropdown per role, each populated from
-	// whatever Skeleton3D is currently resolved.
-	CheckBox *_auto_detect_profile = nullptr;
-	Button *_load_bones_button = nullptr;
-	Tree *_bone_mapping_tree = nullptr;
-	PackedStringArray _bone_names_cache;
-
-	void _on_load_bones_pressed();
-	void _on_auto_detect_toggled(bool p_pressed);
-	Ref<MMSkeletonProfile> _build_manual_profile() const;
+	void _on_skeleton_picker_pressed();
+	void _on_skeleton_popup_selected(int p_index);
+	void _collect_skeletons(Node *p_node, Node *p_scene_root);
 
 	Ref<MotionMatchingResource> _mm_resource;
 	Ref<AnimationLibrary> _library;
