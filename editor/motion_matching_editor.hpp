@@ -15,6 +15,7 @@
 #include <godot_cpp/classes/check_box.hpp>
 #include <godot_cpp/classes/editor_plugin.hpp>
 #include <godot_cpp/classes/editor_resource_picker.hpp>
+#include <godot_cpp/classes/h_box_container.hpp>
 #include <godot_cpp/classes/h_slider.hpp>
 #include <godot_cpp/classes/label.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
@@ -25,8 +26,28 @@
 #include <godot_cpp/classes/tab_container.hpp>
 #include <godot_cpp/classes/tree.hpp>
 #include <godot_cpp/classes/v_box_container.hpp>
+#include <godot_cpp/classes/window.hpp>
 
 namespace godot {
+
+// ---------------------------------------------------------------------------
+// MMNodePathField
+//
+// A LineEdit that also accepts a node dragged straight from the Scene dock --
+// dropping a Skeleton3D onto it is both faster and less error prone than
+// typing its path by hand. Typing still works exactly as before; this only
+// adds the drop target on top.
+// ---------------------------------------------------------------------------
+class MMNodePathField : public LineEdit {
+	GDCLASS(MMNodePathField, LineEdit);
+
+protected:
+	static void _bind_methods();
+
+public:
+	bool _can_drop_data(const Vector2 &p_point, const Variant &p_data) const override;
+	void _drop_data(const Vector2 &p_point, const Variant &p_data) override;
+};
 
 // ---------------------------------------------------------------------------
 // MMDatabaseEditor
@@ -39,7 +60,7 @@ class MMDatabaseEditor : public VBoxContainer {
 	GDCLASS(MMDatabaseEditor, VBoxContainer);
 
 private:
-	LineEdit *_skeleton_path = nullptr;
+	MMNodePathField *_skeleton_path = nullptr;
 	// The dock's anchor: whichever MotionMatchingResource the user is
 	// preparing. Everything else here reads from and writes back to this
 	// same resource (and, in turn, its own path on disk) instead of holding
@@ -82,6 +103,7 @@ private:
 
 	void _on_resource_picked(const Ref<Resource> &p_resource);
 	void _on_library_picked(const Ref<Resource> &p_resource);
+	void _on_skeleton_path_changed(const String &p_text);
 	void _on_scan_pressed();
 	void _on_build_pressed();
 	void _on_save_pressed();
@@ -203,11 +225,32 @@ class MotionMatchingEditorPlugin : public EditorPlugin {
 	GDCLASS(MotionMatchingEditorPlugin, EditorPlugin);
 
 private:
+	// _root holds a one-row toolbar (just the Full Screen button) above
+	// _panel, and is what actually gets docked to the bottom panel. _panel
+	// itself is what moves into _fullscreen_window and back, since that is
+	// the part that was feeling cramped, not the toolbar.
+	VBoxContainer *_root = nullptr;
 	TabContainer *_panel = nullptr;
+	Button *_fullscreen_button = nullptr;
+	// The toggle button add_control_to_bottom_panel() hands back for the
+	// "Motion Matching" tab in the editor's bottom bar. Listened to
+	// directly so pressing that tab jumps straight to full screen instead
+	// of showing the cramped docked view first and waiting for a second
+	// press on _fullscreen_button.
+	Button *_bottom_panel_button = nullptr;
+	// Created the first time Full Screen is pressed, then reused; not the
+	// same as fullscreen video mode -- this is a large, ordinary, OS
+	// decorated Window, so its own native close button is the "X" that
+	// sends the dock back to the editor.
+	Window *_fullscreen_window = nullptr;
 	MMDatabaseEditor *_database_editor = nullptr;
 	MMFeatureEditor *_feature_editor = nullptr;
 	MMTrajectoryEditor *_trajectory_editor = nullptr;
 	MMDebugTools *_debug_tools = nullptr;
+
+	void _on_fullscreen_pressed();
+	void _on_fullscreen_window_close_requested();
+	void _on_bottom_panel_toggled(bool p_visible);
 
 protected:
 	static void _bind_methods();
