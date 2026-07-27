@@ -12,6 +12,62 @@
 
 using namespace godot;
 
+// ---------------------------------------------------------------------------
+// MMNodePathField
+// ---------------------------------------------------------------------------
+
+bool MMNodePathField::_can_drop_data(const Vector2 &p_point, const Variant &p_data) const {
+	if (p_data.get_type() != Variant::DICTIONARY) {
+		return false;
+	}
+	const Dictionary data = p_data;
+	// This is the same drag payload shape the Scene dock hands to every
+	// built-in NodePath field in the Inspector -- matching it means this
+	// field accepts a drop exactly where a person would already expect one
+	// to work.
+	return String(data.get("type", "")) == "nodes";
+}
+
+void MMNodePathField::_drop_data(const Vector2 &p_point, const Variant &p_data) {
+	const Dictionary data = p_data;
+	const Array dropped = data.get("nodes", Array());
+	if (dropped.is_empty()) {
+		return;
+	}
+
+	Node *scene_root = EditorInterface::get_singleton()->get_edited_scene_root();
+	if (scene_root == nullptr || scene_root->get_tree() == nullptr) {
+		return;
+	}
+
+	// Resolved through the live SceneTree rather than string-parsed: the
+	// dropped path from the Scene dock has always been absolute in every
+	// Godot 4 release this addon targets, but going through the actual
+	// Node means a future change to that format cannot silently write a
+	// wrong path in here -- it would just fail to resolve and the drop
+	// would be quietly ignored instead.
+	Node *dropped_node = scene_root->get_tree()->get_root()->get_node_or_null(NodePath(dropped[0]));
+	if (dropped_node == nullptr) {
+		// Fall back to treating the payload as already relative to the
+		// edited scene root, in case that assumption above ever changes.
+		dropped_node = scene_root->get_node_or_null(NodePath(dropped[0]));
+	}
+	if (dropped_node == nullptr) {
+		return;
+	}
+
+	// Always re-expressed relative to the edited scene root, not copied
+	// verbatim -- this is what _resolve_skeleton() expects, and what keeps
+	// the path correct if the scene is ever renamed or moved.
+	set_text(String(scene_root->get_path_to(dropped_node)));
+	grab_focus();
+	emit_signal("text_changed", get_text());
+	emit_signal("text_submitted", get_text());
+}
+
+void MMNodePathField::_bind_methods() {
+}
+
 // Small helper for the repetitive "label plus field on one row" layout.
 static HBoxContainer *mm_add_row(VBoxContainer *p_parent, const String &p_label, Control *p_control) {
 	HBoxContainer *row = memnew(HBoxContainer);
@@ -30,9 +86,9 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_resource_picker->set_base_type("MotionMatchingResource");
 	mm_add_row(this, "Motion Matching Resource", _resource_picker);
 
-	_skeleton_path = memnew(LineEdit);
+	_skeleton_path = memnew(MMNodePathField);
 	_skeleton_path->set_text("%GeneralSkeleton");
-	_skeleton_path->set_placeholder("Node path to the Skeleton3D in the open scene");
+	_skeleton_path->set_placeholder("Node path to the Skeleton3D -- type it, or drag the node in from the Scene dock");
 	mm_add_row(this, "Skeleton node path", _skeleton_path);
 
 	// Backed by the resource above, not a typed-in path: picking (or
@@ -140,6 +196,7 @@ MMDatabaseEditor::MMDatabaseEditor() {
 void MMDatabaseEditor::_ready() {
 	_resource_picker->connect("resource_changed", Callable(this, "_on_resource_picked"));
 	_library_picker->connect("resource_changed", Callable(this, "_on_library_picked"));
+	_skeleton_path->connect("text_changed", Callable(this, "_on_skeleton_path_changed"));
 	_auto_detect_profile->connect("toggled", Callable(this, "_on_auto_detect_toggled"));
 	_load_bones_button->connect("pressed", Callable(this, "_on_load_bones_pressed"));
 	_scan_button->connect("pressed", Callable(this, "_on_scan_pressed"));
@@ -185,6 +242,9 @@ void MMDatabaseEditor::_on_resource_picked(const Ref<Resource> &p_resource) {
 	_library = _mm_resource->get_animation_library();
 	_database = _mm_resource->get_database();
 	_schema = _mm_resource->get_schema();
+	if (!_mm_resource->get_skeleton_path().is_empty()) {
+		_skeleton_path->set_text(String(_mm_resource->get_skeleton_path()));
+	}
 
 	if (_library.is_valid()) {
 		_clip_settings = MMAnimationLibraryTools::auto_tag_library(_library);
@@ -231,6 +291,26 @@ void MMDatabaseEditor::_on_library_picked(const Ref<Resource> &p_resource) {
 	_populate_table();
 	_log_line(vformat("Scanned %d clips and suggested tags for each.",
 			_library->get_animation_list().size()));
+}
+
+void MMDatabaseEditor::_on_skeleton_path_changed(const String &p_text) {
+	if (_mm_resource.is_null()) {
+		return;
+	}
+	// Same persist-immediately pattern as _on_library_picked(): written onto
+	// the resource (and saved to disk, if it has one) as soon as it changes,
+	// so a dropped or typed path survives closing the dock, switching
+	// scenes, or an addon reload, instead of resetting to the placeholder.
+	_mm_resource->set_skeleton_path(NodePath(p_text));
+	if (_mm_resource->get_path().is_empty()) {
+		return;
+	}
+	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
+	if (error != OK) {
+		_log_line(vformat("Could not save the skeleton path back to %s (error %d).",
+							_mm_resource->get_path(), (int)error),
+				Color(1, 0.5f, 0.4f));
+	}
 }
 
 void MMDatabaseEditor::_on_scan_pressed() {
@@ -439,6 +519,7 @@ void MMDatabaseEditor::_on_clip_edited() {
 void MMDatabaseEditor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_resource_picked", "resource"), &MMDatabaseEditor::_on_resource_picked);
 	ClassDB::bind_method(D_METHOD("_on_library_picked", "resource"), &MMDatabaseEditor::_on_library_picked);
+	ClassDB::bind_method(D_METHOD("_on_skeleton_path_changed", "text"), &MMDatabaseEditor::_on_skeleton_path_changed);
 	ClassDB::bind_method(D_METHOD("_on_auto_detect_toggled", "pressed"), &MMDatabaseEditor::_on_auto_detect_toggled);
 	ClassDB::bind_method(D_METHOD("_on_load_bones_pressed"), &MMDatabaseEditor::_on_load_bones_pressed);
 	ClassDB::bind_method(D_METHOD("_on_scan_pressed"), &MMDatabaseEditor::_on_scan_pressed);
