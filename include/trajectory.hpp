@@ -98,9 +98,19 @@ public:
 	void write_features(float *r_query, const Ref<MMFeatureSchema> &p_schema,
 			const Basis &p_character_basis) const;
 
-	// Debug draw data: history first, then the future line.
+	// Debug draw data: history first, then the current sample, then the
+	// future line. All arrays below are the same length and index 1:1 --
+	// index i's direction/velocity/time belongs to index i's own position.
 	PackedVector3Array get_debug_points() const;
 	PackedVector3Array get_debug_directions() const;
+	// Actual velocity at each point, not the facing direction -- during a
+	// strafe or a swing the two disagree, and that disagreement is exactly
+	// what a debug view needs to show instead of hide.
+	PackedVector3Array get_debug_velocities() const;
+	// Seconds relative to now, negative for history. Paired with the other
+	// arrays so a debug draw can label every point with the time (and, by
+	// index, the trajectory sample slot) that fed the feature vector.
+	PackedFloat32Array get_debug_times() const;
 };
 
 } // namespace godot
