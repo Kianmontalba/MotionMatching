@@ -46,11 +46,11 @@ Ref<MMBoxAnimation> MMExtraDatabase::find_box(const String &p_name) const {
 }
 
 Ref<MotionMatchingDatabase> MMExtraDatabase::get_active_database() const {
-	Ref<MMBoxAnimation> box = get_box(_active_box);
+	Ref<MMBoxAnimation> box = get_box(_active_box_index);
 	if (box.is_null()) {
 		return Ref<MotionMatchingDatabase>();
 	}
-	return box->get_database(_active_database);
+	return box->get_database(_active_database_index);
 }
 
 bool MMExtraDatabase::set_active(const String &p_box_name, const String &p_database_name) {
@@ -63,8 +63,8 @@ bool MMExtraDatabase::set_active(const String &p_box_name, const String &p_datab
 		for (int j = 0; j < databases.size(); j++) {
 			Ref<MotionMatchingDatabase> database = databases[j];
 			if (database.is_valid() && database->get_name() == p_database_name) {
-				_active_box = i;
-				_active_database = j;
+				_active_box_index = i;
+				_active_database_index = j;
 				emit_changed();
 				return true;
 			}
@@ -87,8 +87,8 @@ void MMExtraDatabase::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_box", "index"), &MMExtraDatabase::get_box);
 	ClassDB::bind_method(D_METHOD("find_box", "name"), &MMExtraDatabase::find_box);
 
-	MM_BIND_PROPERTY(MMExtraDatabase, Variant::INT, active_box)
-	MM_BIND_PROPERTY(MMExtraDatabase, Variant::INT, active_database)
+	MM_BIND_PROPERTY(MMExtraDatabase, Variant::INT, active_box_index)
+	MM_BIND_PROPERTY(MMExtraDatabase, Variant::INT, active_database_index)
 
 	ClassDB::bind_method(D_METHOD("get_active_database"), &MMExtraDatabase::get_active_database);
 	ClassDB::bind_method(D_METHOD("set_active", "box_name", "database_name"), &MMExtraDatabase::set_active);
