@@ -82,7 +82,7 @@ void MMDebugDraw::_ensure_label_pool(int p_count) {
 	while (_label_pool.size() < p_count) {
 		Label3D *label = memnew(Label3D);
 		label->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
-		label->set_flag(Label3D::FLAG_DISABLE_DEPTH_TEST, true);
+		label->set_draw_flag(Label3D::FLAG_DISABLE_DEPTH_TEST, true);
 		label->set_font_size(_label_font_size);
 		label->set_modulate(_label_color);
 		add_child(label);
