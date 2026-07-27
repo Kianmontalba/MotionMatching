@@ -305,4 +305,9 @@ void MMTrajectory::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_debug_velocities"), &MMTrajectory::get_debug_velocities);
 	ClassDB::bind_method(D_METHOD("get_debug_times"), &MMTrajectory::get_debug_times);
 	ClassDB::bind_method(D_METHOD("get_debug_confidences"), &MMTrajectory::get_debug_confidences);
+	ClassDB::bind_method(D_METHOD("get_current_velocity"), &MMTrajectory::get_current_velocity);
+	ClassDB::bind_method(D_METHOD("get_current_facing"), &MMTrajectory::get_current_facing);
+	ClassDB::bind_method(D_METHOD("get_current_acceleration"), &MMTrajectory::get_current_acceleration);
+	ClassDB::bind_method(D_METHOD("get_desired_velocity"), &MMTrajectory::get_desired_velocity);
+	ClassDB::bind_method(D_METHOD("get_desired_facing"), &MMTrajectory::get_desired_facing);
 }
