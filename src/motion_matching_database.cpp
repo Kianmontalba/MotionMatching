@@ -73,7 +73,21 @@ Array MotionMatchingResource::validate() const {
 		return issues;
 	}
 
-	if (_database->get_frame_count() <= 0) {
+	// _database is now an MMExtraDatabase (boxes of named databases); every
+	// check below is about the one database actually active right now.
+	Ref<MotionMatchingDatabase> active_database = _database->get_active_database();
+	if (active_database.is_null()) {
+		Dictionary issue;
+		issue["severity"] = "error";
+		issue["clip"] = String();
+		issue["message"] = "No active database. Add a box and a database to it in the Database dock "
+							"and build it -- the controller cannot search or play anything until one "
+							"is active.";
+		issues.push_back(issue);
+		return issues;
+	}
+
+	if (active_database->get_frame_count() <= 0) {
 		Dictionary issue;
 		issue["severity"] = "error";
 		issue["clip"] = String();
@@ -82,7 +96,7 @@ Array MotionMatchingResource::validate() const {
 		issues.push_back(issue);
 	}
 
-	if (_database->get_dimension() <= 0) {
+	if (active_database->get_dimension() <= 0) {
 		Dictionary issue;
 		issue["severity"] = "error";
 		issue["clip"] = String();
@@ -91,19 +105,19 @@ Array MotionMatchingResource::validate() const {
 		issues.push_back(issue);
 	}
 
-	if (!_database->is_format_compatible()) {
+	if (!active_database->is_format_compatible()) {
 		Dictionary issue;
 		issue["severity"] = "warning";
 		issue["clip"] = String();
 		issue["message"] = vformat(
 				"Database format_version (%d) does not match the addon's current version (%d). "
 				"It was likely built by a different addon version; rebuilding it is recommended.",
-				_database->get_format_version(), MM_DATABASE_FORMAT_VERSION);
+				active_database->get_format_version(), MM_DATABASE_FORMAT_VERSION);
 		issues.push_back(issue);
 	}
 
-	if (_schema.is_valid() && _database->get_dimension() > 0 &&
-			_schema->get_dimension() != _database->get_dimension()) {
+	if (_schema.is_valid() && active_database->get_dimension() > 0 &&
+			_schema->get_dimension() != active_database->get_dimension()) {
 		Dictionary issue;
 		issue["severity"] = "error";
 		issue["clip"] = String();
@@ -111,12 +125,12 @@ Array MotionMatchingResource::validate() const {
 				"Schema dimension (%d) does not match database dimension (%d). The schema was "
 				"likely changed after this database was built; rebuild the database or reassign "
 				"the schema the database was actually built with.",
-				_schema->get_dimension(), _database->get_dimension());
+				_schema->get_dimension(), active_database->get_dimension());
 		issues.push_back(issue);
 	}
 
-	if (_schema.is_null() && _database.is_valid()) {
-		Ref<MMFeatureSchema> database_schema = _database->get_schema();
+	if (_schema.is_null()) {
+		Ref<MMFeatureSchema> database_schema = active_database->get_schema();
 		if (database_schema.is_null()) {
 			Dictionary issue;
 			issue["severity"] = "warning";
