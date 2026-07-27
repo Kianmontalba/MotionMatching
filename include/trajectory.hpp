@@ -102,6 +102,14 @@ public:
 	Vector3 get_sample_direction(int p_index) const;
 	Vector3 get_sample_velocity(int p_index) const;
 
+	// Live state, for debug panels that want raw numbers rather than
+	// derived sample data (current/desired speed, turn intent, and so on).
+	Vector3 get_current_velocity() const { return _velocity; }
+	Vector3 get_current_facing() const { return _facing; }
+	Vector3 get_current_acceleration() const { return _acceleration; }
+	Vector3 get_desired_velocity() const { return _desired_velocity; }
+	Vector3 get_desired_facing() const { return _desired_facing; }
+
 	// Writes the trajectory block of a query vector, in character space.
 	void write_features(float *r_query, const Ref<MMFeatureSchema> &p_schema,
 			const Basis &p_character_basis) const;
