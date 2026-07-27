@@ -398,9 +398,12 @@ void MMDatabaseEditor::_on_skeleton_picker_pressed() {
 	}
 
 	// Dropped right under the button, the same place any other editor popup
-	// (like an OptionButton) would open.
-	const Rect2 button_rect = _skeleton_picker_button->get_screen_rect();
-	_skeleton_popup->set_position(Vector2i(button_rect.position.x, button_rect.position.y + button_rect.size.y));
+	// (like an OptionButton) would open. Control has get_screen_position()
+	// (screen-space) but no get_screen_rect(), so the rect is built by hand
+	// from that plus the button's own size.
+	const Vector2 button_pos = _skeleton_picker_button->get_screen_position();
+	const Vector2 button_size = _skeleton_picker_button->get_size();
+	_skeleton_popup->set_position(Vector2i(button_pos.x, button_pos.y + button_size.y));
 	_skeleton_popup->popup();
 }
 
