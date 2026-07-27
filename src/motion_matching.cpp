@@ -326,6 +326,19 @@ void MotionMatchingController::update(double p_delta) {
 	const float delta = (float)p_delta;
 	_last_delta_time = delta;
 
+	// Debug-only: how far the character actually moved since the previous
+	// update() call, for comparison against the root motion the animation
+	// produced (see consume_root_motion()'s comment for the one-tick offset
+	// this comparison carries).
+	if (_character != nullptr) {
+		const Vector3 current_position = _character->get_global_transform().origin;
+		if (_has_previous_character_position) {
+			_last_actual_movement_delta = current_position - _previous_character_position;
+		}
+		_previous_character_position = current_position;
+		_has_previous_character_position = true;
+	}
+
 	_time_since_search += delta;
 	_time_in_clip += delta;
 	if (_switch_cooldown_timer > 0.0f) {
@@ -800,6 +813,9 @@ Transform3D MotionMatchingController::consume_root_motion() {
 		delta = _motion_warp->warp_delta(delta, _character->get_global_transform(),
 				(float)_current_time, _last_delta_time);
 	}
+	// Cached purely for get_debug_info()'s root-motion-vs-actual-movement
+	// comparison; does not affect what's returned to the caller.
+	_last_root_motion_delta = delta.origin;
 	return delta;
 }
 
@@ -862,6 +878,63 @@ Dictionary MotionMatchingController::get_debug_info() const {
 	info["traversal_type"] = _traversal.is_valid() ? (int)_traversal->get_detected_type() : 0;
 	info["warp_active"] = is_warping();
 
+	// Movement intent + acceleration debug: raw current/desired state from
+	// the trajectory predictor, decomposed into the character's own
+	// forward/right axes so "running forward" reads as forward regardless
+	// of world-space heading.
+	if (_trajectory.is_valid()) {
+		const Vector3 current_velocity = _trajectory->get_current_velocity();
+		const Vector3 desired_velocity = _trajectory->get_desired_velocity();
+		const Vector3 acceleration = _trajectory->get_current_acceleration();
+		const float current_speed = current_velocity.length();
+		const float desired_speed = desired_velocity.length();
+		const float max_speed = MAX(_trajectory->get_max_speed(), 0.0001f);
+
+		info["speed_current"] = current_speed;
+		info["speed_desired"] = desired_speed;
+		info["speed_max"] = _trajectory->get_max_speed();
+		info["acceleration"] = acceleration.length();
+
+		Vector3 forward = _trajectory->get_current_facing();
+		forward.y = 0.0f;
+		if (forward.length_squared() > 0.000001f) {
+			forward.normalize();
+		} else {
+			forward = Vector3(0, 0, -1);
+		}
+		const Vector3 right = forward.cross(Vector3(0, 1, 0)).normalized();
+
+		if (desired_speed > 0.0001f) {
+			const Vector3 desired_direction = desired_velocity / desired_speed;
+			const float scale = MIN(desired_speed / max_speed, 1.0f) * 100.0f;
+			info["intent_forward_percent"] = desired_direction.dot(forward) * scale;
+			info["intent_right_percent"] = desired_direction.dot(right) * scale;
+		} else {
+			info["intent_forward_percent"] = 0.0f;
+			info["intent_right_percent"] = 0.0f;
+		}
+		info["intent_stop_percent"] = CLAMP(100.0f - (desired_speed / max_speed) * 100.0f, 0.0f, 100.0f);
+
+		// Turn-in-place: only meaningful while nearly stationary -- once the
+		// character is moving, a facing difference is an ordinary turn, not
+		// something that needs a dedicated idle-turn animation.
+		const Vector3 desired_facing = _trajectory->get_desired_facing();
+		const float facing_dot = CLAMP(forward.dot(desired_facing.normalized()), -1.0f, 1.0f);
+		float turn_degrees = Math::rad_to_deg(Math::acos(facing_dot));
+		if (forward.cross(desired_facing).y < 0.0f) {
+			turn_degrees = -turn_degrees;
+		}
+		info["turn_intent_degrees"] = turn_degrees;
+		const float turn_magnitude = turn_degrees < 0.0f ? -turn_degrees : turn_degrees;
+		info["turn_in_place_needed"] = current_speed < 0.15f && turn_magnitude > 30.0f;
+	}
+
+	// Root motion vs. actual character movement -- see the field comments on
+	// _last_root_motion_delta/_last_actual_movement_delta (near their
+	// declaration) for the one-tick offset this comparison carries.
+	info["root_motion_delta_length"] = _last_root_motion_delta.length();
+	info["actual_movement_delta_length"] = _last_actual_movement_delta.length();
+
 	return info;
 }
 
@@ -918,6 +991,56 @@ Dictionary MotionMatchingController::get_debug_cost_breakdown() const {
 		breakdown[group_names[i]] = total > 0.0001f ? (errors[i] / total) * 100.0f : 0.0f;
 	}
 	return breakdown;
+}
+
+Dictionary MotionMatchingController::get_debug_footstep_timing() const {
+	Dictionary result;
+	if (_database.is_null() || _current_animation < 0 || _current_frame < 0 ||
+			_current_frame >= _database->get_frame_count()) {
+		return result;
+	}
+
+	const uint8_t current_contacts = _database->get_frame_contacts_value(_current_frame);
+	const int frame_count = _database->get_frame_count();
+	// Generous but bounded look-ahead. Frames of one animation are stored
+	// contiguously in build order, so hitting a different animation_id (or
+	// the end of the database) means this clip's own frames ran out within
+	// the horizon.
+	const int horizon = 90;
+	int next_left_frame = -1;
+	int next_right_frame = -1;
+	for (int offset = 1; offset <= horizon; offset++) {
+		const int frame = _current_frame + offset;
+		if (frame >= frame_count || _database->get_frame_animation_id(frame) != _current_animation) {
+			break;
+		}
+		const uint8_t contacts = _database->get_frame_contacts_value(frame);
+		if (next_left_frame < 0 && (contacts & 1) != (current_contacts & 1)) {
+			next_left_frame = frame;
+		}
+		if (next_right_frame < 0 && (contacts & 2) != (current_contacts & 2)) {
+			next_right_frame = frame;
+		}
+		if (next_left_frame >= 0 && next_right_frame >= 0) {
+			break;
+		}
+	}
+
+	const float now_time = _database->get_frame_time_value(_current_frame);
+	if (next_left_frame >= 0) {
+		result["next_left_change_seconds"] = _database->get_frame_time_value(next_left_frame) - now_time;
+	}
+	if (next_right_frame >= 0) {
+		result["next_right_change_seconds"] = _database->get_frame_time_value(next_right_frame) - now_time;
+	}
+	return result;
+}
+
+Dictionary MotionMatchingController::get_debug_filter_stats() const {
+	if (_search.is_null() || !_search->is_built()) {
+		return Dictionary();
+	}
+	return _search->count_filtered_frames_debug_raw(_build_filter());
 }
 
 void MotionMatchingController::_bind_methods() {
@@ -992,6 +1115,10 @@ void MotionMatchingController::_bind_methods() {
 			&MotionMatchingController::get_debug_candidates, DEFVAL(3));
 	ClassDB::bind_method(D_METHOD("get_debug_cost_breakdown"),
 			&MotionMatchingController::get_debug_cost_breakdown);
+	ClassDB::bind_method(D_METHOD("get_debug_footstep_timing"),
+			&MotionMatchingController::get_debug_footstep_timing);
+	ClassDB::bind_method(D_METHOD("get_debug_filter_stats"),
+			&MotionMatchingController::get_debug_filter_stats);
 
 	ClassDB::bind_method(D_METHOD("get_profiler"), &MotionMatchingController::get_profiler);
 
