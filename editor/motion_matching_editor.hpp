@@ -7,12 +7,15 @@
 #include "feature.hpp"
 #include "feature_extractor.hpp"
 #include "frame_database.hpp"
+#include "mm_box_animation.hpp"
+#include "mm_extra_database.hpp"
 #include "mm_types.hpp"
 #include "motion_matching.hpp"
 
 #include <godot_cpp/classes/box_container.hpp>
 #include <godot_cpp/classes/button.hpp>
 #include <godot_cpp/classes/check_box.hpp>
+#include <godot_cpp/classes/check_button.hpp>
 #include <godot_cpp/classes/editor_plugin.hpp>
 #include <godot_cpp/classes/editor_resource_picker.hpp>
 #include <godot_cpp/classes/h_box_container.hpp>
@@ -87,6 +90,38 @@ private:
 	// controls are ever torn down and recreated (e.g. a GDExtension reload).
 	EditorResourcePicker *_resource_picker = nullptr;
 	EditorResourcePicker *_library_picker = nullptr;
+
+	// Animation-set hierarchy: MotionMatchingResource -> MMExtraDatabase (add
+	// only) -> MMBoxAnimation (add only, renameable -- "Normal Rifle",
+	// "Pistol", "Zombie") -> MotionMatchingDatabase (renameable -- "Walk",
+	// "Sprint", "Jump", "Traversal"). Unlimited boxes, unlimited databases
+	// per box. Exactly one box/database pair is "active" (what Build,
+	// Validate, Save and the clip table below all operate on) at a time.
+	Ref<MMExtraDatabase> _extra_database;
+	OptionButton *_box_option = nullptr;
+	LineEdit *_box_name_edit = nullptr;
+	Button *_add_box_button = nullptr;
+	OptionButton *_database_option = nullptr;
+	LineEdit *_database_name_edit = nullptr;
+	Button *_add_database_button = nullptr;
+	// Not a status readout -- pressing it sets loop on every MMAnimationEntry
+	// in the currently selected database in one go (handled inside
+	// MotionMatchingDatabase itself), instead of clicking through the clip
+	// table one row at a time.
+	CheckButton *_loop_toggle = nullptr;
+
+	void _on_box_selected(int p_index);
+	void _on_add_box_pressed();
+	void _on_box_name_changed(const String &p_text);
+	void _on_database_selected(int p_index);
+	void _on_add_database_pressed();
+	void _on_database_name_changed(const String &p_text);
+	void _on_loop_toggle_toggled(bool p_pressed);
+	void _refresh_box_options();
+	void _refresh_database_options();
+	void _persist_extra_database();
+	void _save_all_databases();
+
 	SpinBox *_sample_rate = nullptr;
 	// Corrects a root/hip bone rest orientation that does not point the way
 	// the character actually walks (common on Mixamo-style rigs, usually
