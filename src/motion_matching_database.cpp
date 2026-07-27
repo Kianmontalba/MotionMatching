@@ -155,6 +155,8 @@ void MotionMatchingResource::_bind_methods() {
 			"set_cost_function", "get_cost_function");
 
 	MM_BIND_PROPERTY(MotionMatchingResource, Variant::NODE_PATH, skeleton_path)
+	MM_BIND_PROPERTY(MotionMatchingResource, Variant::STRING, left_foot_override)
+	MM_BIND_PROPERTY(MotionMatchingResource, Variant::STRING, right_foot_override)
 
 	ADD_GROUP("Search", "");
 	MM_BIND_PROPERTY(MotionMatchingResource, Variant::FLOAT, search_interval)
