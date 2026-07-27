@@ -862,6 +862,57 @@ PackedVector3Array MotionMatchingController::get_debug_trajectory() const {
 	return _trajectory->get_debug_points();
 }
 
+Array MotionMatchingController::get_debug_candidates(int p_count) const {
+	if (_search.is_null() || !_search->is_built() || _cost_function.is_null() || _query.is_empty()) {
+		return Array();
+	}
+	return _search->search_top_candidates_debug_raw(_query.ptr(), _cost_function, _build_filter(), p_count);
+}
+
+Dictionary MotionMatchingController::get_debug_cost_breakdown() const {
+	Dictionary breakdown;
+	if (_database.is_null() || _cost_function.is_null() || _query.is_empty() ||
+			_last_result.frame_index < 0 || _last_result.frame_index >= _database->get_frame_count()) {
+		return breakdown;
+	}
+
+	const int dimension = _query.size();
+	const float *frame_features = _database->get_frame_features(_last_result.frame_index);
+
+	// compute_group_errors() takes PackedFloat32Array (it is the scriptable,
+	// debug-facing side of the cost function); the hot path's raw float*
+	// query and frame data get copied into one only here, off the hot path.
+	PackedFloat32Array query_vector;
+	query_vector.resize(dimension);
+	PackedFloat32Array frame_vector;
+	frame_vector.resize(dimension);
+	for (int i = 0; i < dimension; i++) {
+		query_vector.set(i, _query[i]);
+		frame_vector.set(i, frame_features[i]);
+	}
+
+	const PackedFloat32Array errors = _cost_function->compute_group_errors(query_vector, frame_vector);
+
+	static const char *group_names[MM_GROUP_MAX] = {
+		"trajectory_position",
+		"trajectory_direction",
+		"pose_position",
+		"pose_velocity",
+		"root_velocity",
+		"extra",
+	};
+
+	float total = 0.0f;
+	for (int i = 0; i < errors.size(); i++) {
+		total += errors[i];
+	}
+
+	for (int i = 0; i < errors.size() && i < MM_GROUP_MAX; i++) {
+		breakdown[group_names[i]] = total > 0.0001f ? (errors[i] / total) * 100.0f : 0.0f;
+	}
+	return breakdown;
+}
+
 void MotionMatchingController::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_resource", "resource"), &MotionMatchingController::set_resource);
 	ClassDB::bind_method(D_METHOD("get_resource"), &MotionMatchingController::get_resource);
@@ -926,6 +977,10 @@ void MotionMatchingController::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("consume_root_motion"), &MotionMatchingController::consume_root_motion);
 	ClassDB::bind_method(D_METHOD("get_debug_info"), &MotionMatchingController::get_debug_info);
 	ClassDB::bind_method(D_METHOD("get_debug_trajectory"), &MotionMatchingController::get_debug_trajectory);
+	ClassDB::bind_method(D_METHOD("get_debug_candidates", "count"),
+			&MotionMatchingController::get_debug_candidates, DEFVAL(3));
+	ClassDB::bind_method(D_METHOD("get_debug_cost_breakdown"),
+			&MotionMatchingController::get_debug_cost_breakdown);
 
 	ClassDB::bind_method(D_METHOD("get_profiler"), &MotionMatchingController::get_profiler);
 
