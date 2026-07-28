@@ -742,7 +742,7 @@ void MotionMatchingController::_apply_match(const MMMatchResult &p_match) {
 	// Debug-only: logged here (not in _consume_result()) because this is
 	// the point where a switch actually happened, not just a candidate that
 	// was considered.
-	_record_transition(_previous_animation >= 0 ? _previous_clip : String(), _current_clip, p_match.cost);
+	_record_transition(_previous_animation >= 0 ? String(_previous_clip) : String(), _current_clip, p_match.cost);
 
 	// The whole point of motion matching: enter the clip where the motion
 	// actually continues, never at zero.
@@ -1082,7 +1082,7 @@ void MotionMatchingController::_record_search_cost(int p_animation_id, float p_c
 	Dictionary entry = _animation_stats.get(p_animation_id, Dictionary());
 	if (entry.is_empty()) {
 		Ref<MMAnimationEntry> anim = _database.is_valid() ? _database->get_animation_entry(p_animation_id) : Ref<MMAnimationEntry>();
-		entry["clip_name"] = anim.is_valid() ? anim->get_qualified_name() : vformat("id %d", p_animation_id);
+		entry["clip_name"] = anim.is_valid() ? String(anim->get_qualified_name()) : vformat("id %d", p_animation_id);
 		entry["search_count"] = 0;
 		entry["total_cost"] = 0.0f;
 		entry["play_count"] = 0;
