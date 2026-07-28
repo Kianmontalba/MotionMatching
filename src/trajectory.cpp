@@ -144,6 +144,29 @@ void MMTrajectory::update(double p_delta) {
 	}
 
 	_acceleration = acceleration;
+
+	// Signed yaw rate for the feature vector, in radians/sec. Uses the same
+	// atan2(x, -z) + wrap-to-[-pi,pi] convention feature_extractor.cpp uses
+	// to bake this same feature into the database (see its per-frame
+	// angular_velocity computation) -- the two sides must agree on sign and
+	// magnitude, or the feature actively misleads the search instead of
+	// helping it. Deliberately NOT read from the prediction loop's internal
+	// facing_rate above -- that variable is scoped to (and mutated by) the
+	// future-sample stepping, and computing this independently keeps it
+	// correct even if the prediction loop's stepping changes.
+	_yaw_rate = 0.0f;
+	if (count > 0 && _future.size() > 0 && _sample_times[0] > 0.0001f) {
+		const float yaw_now = Math::atan2(_facing.x, -_facing.z);
+		const float yaw_future = Math::atan2(_future[0].direction.x, -_future[0].direction.z);
+		float yaw_delta = yaw_future - yaw_now;
+		while (yaw_delta > Math_PI) {
+			yaw_delta -= Math_TAU;
+		}
+		while (yaw_delta < -Math_PI) {
+			yaw_delta += Math_TAU;
+		}
+		_yaw_rate = yaw_delta / _sample_times[0];
+	}
 }
 
 void MMTrajectory::set_external_samples(const PackedVector3Array &p_positions,
@@ -209,6 +232,10 @@ void MMTrajectory::write_features(float *r_query, const Ref<MMFeatureSchema> &p_
 		}
 		r_query[direction_offset + i * 2 + 0] = local_direction.x;
 		r_query[direction_offset + i * 2 + 1] = local_direction.z;
+	}
+
+	if (p_schema->get_include_yaw_rate()) {
+		r_query[p_schema->get_yaw_rate_offset()] = _yaw_rate;
 	}
 }
 
@@ -308,6 +335,7 @@ void MMTrajectory::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_current_velocity"), &MMTrajectory::get_current_velocity);
 	ClassDB::bind_method(D_METHOD("get_current_facing"), &MMTrajectory::get_current_facing);
 	ClassDB::bind_method(D_METHOD("get_current_acceleration"), &MMTrajectory::get_current_acceleration);
+	ClassDB::bind_method(D_METHOD("get_current_yaw_rate"), &MMTrajectory::get_current_yaw_rate);
 	ClassDB::bind_method(D_METHOD("get_desired_velocity"), &MMTrajectory::get_desired_velocity);
 	ClassDB::bind_method(D_METHOD("get_desired_facing"), &MMTrajectory::get_desired_facing);
 }
