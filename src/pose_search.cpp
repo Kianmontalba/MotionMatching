@@ -177,8 +177,19 @@ void MMPoseSearch::_descend(int p_node, SearchState &r_state) const {
 
 	_descend(near_child, r_state);
 
-	// The far side can only contain a better frame if crossing the split plane
-	// alone does not already cost more than the best match so far.
+	// The far side can only contain a better frame if crossing the split
+	// plane alone does not already cost more than the best match so far.
+	// If this split's dimension is beyond a LOD-truncated r_state.dimension,
+	// that dimension isn't part of the cost being compared at all -- the
+	// bound below would be testing an unrelated quantity against best_cost,
+	// which could prune away a branch that actually holds the true best
+	// match under the truncated cost. Safer to just not prune here: worse
+	// for speed, never wrong.
+	if (node.split_dimension >= r_state.dimension) {
+		_descend(far_child, r_state);
+		return;
+	}
+
 	const float bound = r_state.weights[node.split_dimension] * delta * delta;
 	if (bound < r_state.best_cost) {
 		_descend(far_child, r_state);
@@ -187,7 +198,7 @@ void MMPoseSearch::_descend(int p_node, SearchState &r_state) const {
 
 MMMatchResult MMPoseSearch::search(const float *p_query, const Ref<MMCostFunction> &p_cost,
 		const MMSearchFilter &p_filter, const MMSearchContext &p_context,
-		MMSearchStats &r_stats) const {
+		MMSearchStats &r_stats, int p_max_dimension) const {
 	MMMatchResult result;
 	if (!_built || _database.is_null() || p_cost.is_null()) {
 		return result;
@@ -202,7 +213,11 @@ MMMatchResult MMPoseSearch::search(const float *p_query, const Ref<MMCostFunctio
 	state.filter = &p_filter;
 	state.db = _database.ptr();
 	state.cost = p_cost.ptr();
-	state.dimension = _dimension;
+	// LOD: comparing fewer dimensions is strictly cheaper per frame, and
+	// safe to do against the same full-dimension tree -- see _descend()'s
+	// comment on why a split beyond this cap simply can't prune, instead of
+	// pruning incorrectly.
+	state.dimension = (p_max_dimension > 0) ? MIN(_dimension, p_max_dimension) : _dimension;
 	state.max_comparisons = p_context.max_comparisons;
 	state.best_cost = p_context.best_cost_seed;
 	state.stats = &r_stats;
