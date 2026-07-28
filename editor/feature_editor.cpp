@@ -10,7 +10,7 @@ using namespace godot;
 
 static const char *MM_GROUP_NAMES[MM_GROUP_MAX] = {
 	"Trajectory position", "Trajectory direction", "Pose position",
-	"Pose velocity", "Root velocity", "Extra", "Yaw rate"
+	"Pose velocity", "Root velocity", "Extra"
 };
 
 MMFeatureEditor::MMFeatureEditor() {
