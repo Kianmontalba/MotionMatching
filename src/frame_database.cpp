@@ -190,6 +190,124 @@ void MotionMatchingDatabase::finalize(int p_dimension) {
 	emit_changed();
 }
 
+// Reduces resident memory by keeping only every p_stride-th frame per clip.
+// Frames belong to exactly one clip (frame_start/frame_count), so the
+// reduction runs per clip rather than across the whole flat array -- this is
+// what keeps a clip boundary from ever blending frames that were never
+// adjacent in the source animation. The clip's true last frame is always
+// kept in addition to the strided picks, since that is the exact pose a
+// non-looping clip (a landing, a stop) blends out to; losing it would make
+// the blend-out reach for a slightly earlier pose instead.
+//
+// _sample_rate is divided by the same factor afterwards: get_frame_at_time()
+// converts a playback time into a frame offset by multiplying by
+// _sample_rate, and every kept frame is now p_stride times further apart in
+// time than before, so leaving the rate unchanged would make every time
+// lookup land roughly p_stride frames too far into the clip.
+void MotionMatchingDatabase::reduce_frame_stride(int p_stride) {
+	if (p_stride <= 1 || p_stride <= _applied_stride || _dimension <= 0) {
+		return;
+	}
+
+	// How much further to thin an already-reduced copy: e.g. going from
+	// applied=2 to a requested 6 means dropping to every 3rd of what is
+	// already kept, not starting over from data that no longer exists.
+	const int relative_stride = p_stride / _applied_stride;
+	if (relative_stride <= 1) {
+		return;
+	}
+
+	const float *old_features = _features.ptr();
+
+	PackedFloat32Array new_features;
+	PackedInt32Array new_frame_animation;
+	PackedFloat32Array new_frame_time;
+	PackedFloat32Array new_frame_normalized_time;
+	PackedVector3Array new_frame_root_velocity;
+	PackedFloat32Array new_frame_angular_velocity;
+	PackedFloat32Array new_frame_speed;
+	PackedInt32Array new_frame_tags;
+	PackedByteArray new_frame_category;
+	PackedByteArray new_frame_contacts;
+
+	int new_count = 0;
+
+	for (int a = 0; a < _animations.size(); a++) {
+		Ref<MMAnimationEntry> entry = _animations[a];
+		if (entry.is_null()) {
+			continue;
+		}
+
+		const int start = entry->get_frame_start();
+		const int count = entry->get_frame_count();
+		if (count <= 0) {
+			entry->set_frame_start(new_count);
+			entry->set_frame_count(0);
+			continue;
+		}
+
+		const int new_start = new_count;
+		int kept_in_clip = 0;
+		int last_kept_src = -1;
+
+		for (int f = 0; f < count; f += relative_stride) {
+			const int src = start + f;
+			for (int d = 0; d < _dimension; d++) {
+				new_features.push_back(old_features[(int64_t)src * _dimension + d]);
+			}
+			new_frame_animation.push_back(a);
+			new_frame_time.push_back(_frame_time[src]);
+			new_frame_normalized_time.push_back(_frame_normalized_time[src]);
+			new_frame_root_velocity.push_back(_frame_root_velocity[src]);
+			new_frame_angular_velocity.push_back(_frame_angular_velocity[src]);
+			new_frame_speed.push_back(_frame_speed[src]);
+			new_frame_tags.push_back(_frame_tags[src]);
+			new_frame_category.push_back(_frame_category[src]);
+			new_frame_contacts.push_back(_frame_contacts[src]);
+			last_kept_src = src;
+			kept_in_clip++;
+			new_count++;
+		}
+
+		const int true_last_src = start + count - 1;
+		if (last_kept_src != true_last_src) {
+			for (int d = 0; d < _dimension; d++) {
+				new_features.push_back(old_features[(int64_t)true_last_src * _dimension + d]);
+			}
+			new_frame_animation.push_back(a);
+			new_frame_time.push_back(_frame_time[true_last_src]);
+			new_frame_normalized_time.push_back(_frame_normalized_time[true_last_src]);
+			new_frame_root_velocity.push_back(_frame_root_velocity[true_last_src]);
+			new_frame_angular_velocity.push_back(_frame_angular_velocity[true_last_src]);
+			new_frame_speed.push_back(_frame_speed[true_last_src]);
+			new_frame_tags.push_back(_frame_tags[true_last_src]);
+			new_frame_category.push_back(_frame_category[true_last_src]);
+			new_frame_contacts.push_back(_frame_contacts[true_last_src]);
+			kept_in_clip++;
+			new_count++;
+		}
+
+		entry->set_frame_start(new_start);
+		entry->set_frame_count(kept_in_clip);
+	}
+
+	_features = new_features;
+	_frame_animation = new_frame_animation;
+	_frame_time = new_frame_time;
+	_frame_normalized_time = new_frame_normalized_time;
+	_frame_root_velocity = new_frame_root_velocity;
+	_frame_angular_velocity = new_frame_angular_velocity;
+	_frame_speed = new_frame_speed;
+	_frame_tags = new_frame_tags;
+	_frame_category = new_frame_category;
+	_frame_contacts = new_frame_contacts;
+
+	_sample_rate /= (float)relative_stride;
+	_applied_stride = p_stride;
+
+	emit_changed();
+}
+
 void MotionMatchingDatabase::clear() {
 	_animations.clear();
 	_features.clear();
@@ -204,6 +322,7 @@ void MotionMatchingDatabase::clear() {
 	_frame_tags.clear();
 	_frame_category.clear();
 	_frame_contacts.clear();
+	_applied_stride = 1;
 	emit_changed();
 }
 
@@ -321,6 +440,7 @@ void MotionMatchingDatabase::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_frame_at_time", "animation_id", "time"), &MotionMatchingDatabase::get_frame_at_time);
 	ClassDB::bind_method(D_METHOD("normalize_query", "query"), &MotionMatchingDatabase::normalize_query);
 	ClassDB::bind_method(D_METHOD("finalize", "dimension"), &MotionMatchingDatabase::finalize);
+	ClassDB::bind_method(D_METHOD("reduce_frame_stride", "stride"), &MotionMatchingDatabase::reduce_frame_stride);
 	ClassDB::bind_method(D_METHOD("clear"), &MotionMatchingDatabase::clear);
 	ClassDB::bind_method(D_METHOD("get_frame_info", "frame"), &MotionMatchingDatabase::get_frame_info);
 	ClassDB::bind_method(D_METHOD("get_statistics"), &MotionMatchingDatabase::get_statistics);
