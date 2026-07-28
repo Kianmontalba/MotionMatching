@@ -23,6 +23,7 @@ namespace godot {
 //
 //   [ trajectory positions  ] 2 floats (x, z) per trajectory point
 //   [ trajectory directions ] 2 floats (x, z) per trajectory point
+//   [ yaw rate              ] 1 float                     (optional)
 //   [ root velocity         ] 3 floats                    (optional)
 //   [ bone positions        ] 3 floats per tracked bone
 //   [ bone velocities       ] 3 floats per tracked bone   (optional)
@@ -42,12 +43,19 @@ private:
 	bool _include_hands = false;
 	bool _include_bone_velocity = true;
 	bool _include_root_velocity = true;
+	// Signed yaw rate (radians/sec, +left/-right by the same convention as
+	// the rest of the addon's rotation math) as its own 1-float feature.
+	// This is what lets the search naturally prefer a clip whose turn speed
+	// matches the desired turn, instead of only matching position/velocity
+	// and leaving turn intensity to chance.
+	bool _include_yaw_rate = true;
 	int _extra_dimensions = 0;
 
 	// Cached layout, rebuilt whenever a setting changes.
 	int _dimension = 0;
 	int _offset_trajectory_position = 0;
 	int _offset_trajectory_direction = 0;
+	int _offset_yaw_rate = 0;
 	int _offset_bone_position = 0;
 	int _offset_bone_velocity = 0;
 	int _offset_root_velocity = 0;
@@ -88,6 +96,9 @@ public:
 	void set_include_root_velocity(bool p_enabled);
 	bool get_include_root_velocity() const { return _include_root_velocity; }
 
+	void set_include_yaw_rate(bool p_enabled);
+	bool get_include_yaw_rate() const { return _include_yaw_rate; }
+
 	void set_extra_dimensions(int p_count);
 	int get_extra_dimensions() const { return _extra_dimensions; }
 
@@ -98,6 +109,7 @@ public:
 
 	int get_trajectory_position_offset() const { return _offset_trajectory_position; }
 	int get_trajectory_direction_offset() const { return _offset_trajectory_direction; }
+	int get_yaw_rate_offset() const { return _offset_yaw_rate; }
 	int get_bone_position_offset() const { return _offset_bone_position; }
 	int get_bone_velocity_offset() const { return _offset_bone_velocity; }
 	int get_root_velocity_offset() const { return _offset_root_velocity; }
