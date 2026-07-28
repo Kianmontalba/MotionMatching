@@ -58,6 +58,23 @@ public:
 	// Returns false (and leaves the selection unchanged) if either name
 	// isn't found.
 	bool set_active(const String &p_box_name, const String &p_database_name);
+
+	// Every database (across every box) whose MotionMatchingDatabase::tag
+	// matches p_tag, in box/database order. Several named databases (e.g.
+	// "Stand", "Walk", "Run", "Sprint") can share one grouping tag -- this
+	// is how a script-facing tag becomes a "code name" for the whole set of
+	// them. Empty if nothing has that tag.
+	TypedArray<MotionMatchingDatabase> find_databases_by_tag(int p_tag) const;
+
+	// Points the active selection at whichever database has this tag. If
+	// more than one database shares the tag, p_reference_speed (pass a
+	// negative value to skip this) picks the one whose get_speed_range()
+	// best fits it -- this is what lets "locomotion = tag 1" auto-resolve to
+	// Stand, Walk, Run, or Sprint depending on how fast the character is
+	// currently moving, without the caller needing to know those names.
+	// Returns false (and leaves the selection unchanged) if no database has
+	// this tag.
+	bool set_active_by_tag(int p_tag, float p_reference_speed = -1.0f);
 };
 
 } // namespace godot
