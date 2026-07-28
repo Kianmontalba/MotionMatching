@@ -75,6 +75,12 @@ public:
 		MMSearchFilter filter;
 		MMSearchContext context;
 		uint64_t id = 0;
+		// -1 means "use the tree's full dimension" -- see
+		// MMPoseSearch::search()'s p_max_dimension parameter. Kept separate
+		// from query's own size (always the full query buffer) rather than
+		// truncating the copy itself, so a mismatched buffer length can
+		// never read past what was actually copied.
+		int max_dimension = -1;
 	};
 
 	struct Response {
@@ -108,9 +114,10 @@ public:
 	void stop();
 	bool is_running() const { return _running.load(); }
 
-	// Overwrites any request that has not been picked up yet.
+	// Overwrites any request that has not been picked up yet. p_max_dimension
+	// is forwarded to MMPoseSearch::search() unchanged -- see its comment.
 	uint64_t submit(const float *p_query, int p_dimension, const MMSearchFilter &p_filter,
-			const MMSearchContext &p_context);
+			const MMSearchContext &p_context, int p_max_dimension = -1);
 
 	// Non blocking. Returns false when the worker is still thinking.
 	bool poll(Response &r_response);
