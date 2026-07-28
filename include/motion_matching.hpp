@@ -259,6 +259,28 @@ private:
 	Vector3 _previous_character_position;
 	bool _has_previous_character_position = false;
 
+	// rebuild() used to call _search->build() directly on whatever thread
+	// called it -- for a database with many frames and a wide feature
+	// vector (more tracked bones, root velocity, yaw rate, extra
+	// dimensions all add up), that is expensive enough to block _ready()
+	// for a long time on weak hardware. That block is what was actually
+	// behind reports of the game "hanging at the splash screen" instead of
+	// starting -- not a crash, just a very long synchronous wait with
+	// nothing rendered yet. Building on a thread instead means update()
+	// has to explicitly skip searching until the build finishes; see its
+	// guard clause and _finish_rebuild_if_ready().
+	std::thread _build_thread;
+	std::atomic<bool> _build_in_progress{ false };
+	// What rebuild() wants to happen once the in-flight build finishes:
+	// clearing the cache, resizing the query, rebuilding the cost function,
+	// and starting the async search worker (only that last part actually
+	// depends on the tree existing; the rest could run immediately, but
+	// keeping all of it together in one place is what makes rebuild()
+	// safe to call again while a previous build is still running).
+	bool _async_search_requested = false;
+
+	void _finish_rebuild_if_ready();
+
 	// Debug-only: per-animation running stats, accumulated as the
 	// controller plays, cleared only by reset_debug_analytics(). Key is
 	// animation_id (int); value is a Dictionary {"clip_name", "search_count",
