@@ -603,12 +603,23 @@ void MotionMatchingController::_run_search() {
 		return;
 	}
 
+	// Mobile/low-end LOD: MotionMatchingResource::quality picks how many of
+	// the schema's leading feature dimensions are actually compared, per
+	// MMFeatureSchema::get_lod_dimension()'s documented prefix ordering.
+	// This was previously a dead property -- set_quality()/get_quality()
+	// existed and get_lod_dimension() computed the right number, but
+	// nothing ever read either at search time, so every device always ran
+	// the full ULTRA-dimension search regardless of this setting.
+	const int lod_dimension = (_resource.is_valid() && _schema.is_valid())
+			? _schema->get_lod_dimension(_resource->get_quality())
+			: -1;
+
 	if (_async_search && _worker.is_running()) {
-		_pending_request = _worker.submit(_query.ptr(), _query.size(), filter, context);
+		_pending_request = _worker.submit(_query.ptr(), _query.size(), filter, context, lod_dimension);
 		return;
 	}
 
-	const MMMatchResult result = _search->search(_query.ptr(), _cost_function, filter, context, _stats);
+	const MMMatchResult result = _search->search(_query.ptr(), _cost_function, filter, context, _stats, lod_dimension);
 	_stats.cache_hits = _cache.get_hits();
 	_stats.cache_misses = _cache.get_misses();
 	_profiler->record(_stats.search_time_usec, _stats.frames_compared, _stats.candidates_visited,
@@ -647,6 +658,12 @@ void MotionMatchingController::_consume_result(const MMMatchResult &p_result) {
 		// fallback is always the pose we already have.
 		return;
 	}
+	// Debug-only, and deliberately here rather than in _apply_match() below:
+	// this records how this animation's best frame scored on THIS search,
+	// whether or not it actually wins the switch decision -- that is what
+	// makes the accumulated average a "how competitive is this animation"
+	// signal instead of just "how often did it win."
+	_record_search_cost(p_result.animation_id, p_result.cost);
 	_cache.store(_pending_cache_key, p_result.frame_index, p_result.cost);
 	if (_should_switch(p_result)) {
 		_apply_match(p_result);
@@ -721,6 +738,11 @@ void MotionMatchingController::_apply_match(const MMMatchResult &p_match) {
 
 	_current_animation = p_match.animation_id;
 	_current_clip = entry->get_qualified_name();
+
+	// Debug-only: logged here (not in _consume_result()) because this is
+	// the point where a switch actually happened, not just a candidate that
+	// was considered.
+	_record_transition(_previous_animation >= 0 ? _previous_clip : String(), _current_clip, p_match.cost);
 
 	// The whole point of motion matching: enter the clip where the motion
 	// actually continues, never at zero.
@@ -925,6 +947,14 @@ Dictionary MotionMatchingController::get_debug_info() const {
 			turn_degrees = -turn_degrees;
 		}
 		info["turn_intent_degrees"] = turn_degrees;
+		// Classifies the continuous angle above into the 45/90/135/180
+		// buckets a traditional turn-in-place clip set is usually authored
+		// around -- see mm_turn_bucket_for_degrees()'s comment for why this
+		// isn't a stored tag. Gameplay code can use this to bias which
+		// pre-tagged clip group it looks for; the continuous yaw-rate
+		// feature (schema-level, see MMFeatureSchema::get_yaw_rate_offset())
+		// is what actually drives the search itself.
+		info["turn_bucket"] = (int)mm_turn_bucket_for_degrees(turn_degrees);
 		const float turn_magnitude = turn_degrees < 0.0f ? -turn_degrees : turn_degrees;
 		info["turn_in_place_needed"] = current_speed < 0.15f && turn_magnitude > 30.0f;
 	}
@@ -980,6 +1010,7 @@ Dictionary MotionMatchingController::get_debug_cost_breakdown() const {
 		"pose_velocity",
 		"root_velocity",
 		"extra",
+		"yaw_rate",
 	};
 
 	float total = 0.0f;
@@ -1041,6 +1072,78 @@ Dictionary MotionMatchingController::get_debug_filter_stats() const {
 		return Dictionary();
 	}
 	return _search->count_filtered_frames_debug_raw(_build_filter());
+}
+
+void MotionMatchingController::_record_search_cost(int p_animation_id, float p_cost) {
+	if (p_animation_id < 0 || !Math::is_finite((double)p_cost)) {
+		return;
+	}
+
+	Dictionary entry = _animation_stats.get(p_animation_id, Dictionary());
+	if (entry.is_empty()) {
+		Ref<MMAnimationEntry> anim = _database.is_valid() ? _database->get_animation_entry(p_animation_id) : Ref<MMAnimationEntry>();
+		entry["clip_name"] = anim.is_valid() ? anim->get_qualified_name() : vformat("id %d", p_animation_id);
+		entry["search_count"] = 0;
+		entry["total_cost"] = 0.0f;
+		entry["play_count"] = 0;
+	}
+	entry["search_count"] = (int)entry["search_count"] + 1;
+	entry["total_cost"] = (float)entry["total_cost"] + p_cost;
+	_animation_stats[p_animation_id] = entry;
+}
+
+void MotionMatchingController::_record_transition(const String &p_from_clip, const String &p_to_clip, float p_cost) {
+	Dictionary log_entry;
+	log_entry["time"] = (double)Time::get_singleton()->get_ticks_msec() / 1000.0;
+	log_entry["from_clip"] = p_from_clip;
+	log_entry["to_clip"] = p_to_clip;
+	log_entry["cost"] = p_cost;
+	_transition_log.push_back(log_entry);
+
+	static const int MM_TRANSITION_LOG_CAPACITY = 24;
+	while (_transition_log.size() > MM_TRANSITION_LOG_CAPACITY) {
+		_transition_log.remove_at(0);
+	}
+
+	if (_current_animation < 0) {
+		return;
+	}
+	Dictionary entry = _animation_stats.get(_current_animation, Dictionary());
+	if (entry.is_empty()) {
+		entry["clip_name"] = p_to_clip;
+		entry["search_count"] = 0;
+		entry["total_cost"] = 0.0f;
+		entry["play_count"] = 0;
+	}
+	entry["play_count"] = (int)entry["play_count"] + 1;
+	_animation_stats[_current_animation] = entry;
+}
+
+Dictionary MotionMatchingController::get_debug_analytics() const {
+	Dictionary result;
+	Array keys = _animation_stats.keys();
+	for (int i = 0; i < keys.size(); i++) {
+		const Variant key = keys[i];
+		const Dictionary source = _animation_stats[key];
+		Dictionary entry;
+		entry["clip_name"] = source.get("clip_name", "");
+		entry["search_count"] = source.get("search_count", 0);
+		entry["play_count"] = source.get("play_count", 0);
+		const int search_count = (int)source.get("search_count", 0);
+		const float total_cost = (float)source.get("total_cost", 0.0f);
+		entry["average_cost"] = search_count > 0 ? total_cost / (float)search_count : 0.0f;
+		result[key] = entry;
+	}
+	return result;
+}
+
+Array MotionMatchingController::get_debug_transitions() const {
+	return _transition_log.duplicate();
+}
+
+void MotionMatchingController::reset_debug_analytics() {
+	_animation_stats.clear();
+	_transition_log.clear();
 }
 
 void MotionMatchingController::_bind_methods() {
@@ -1119,6 +1222,12 @@ void MotionMatchingController::_bind_methods() {
 			&MotionMatchingController::get_debug_footstep_timing);
 	ClassDB::bind_method(D_METHOD("get_debug_filter_stats"),
 			&MotionMatchingController::get_debug_filter_stats);
+	ClassDB::bind_method(D_METHOD("get_debug_analytics"),
+			&MotionMatchingController::get_debug_analytics);
+	ClassDB::bind_method(D_METHOD("get_debug_transitions"),
+			&MotionMatchingController::get_debug_transitions);
+	ClassDB::bind_method(D_METHOD("reset_debug_analytics"),
+			&MotionMatchingController::reset_debug_analytics);
 
 	ClassDB::bind_method(D_METHOD("get_profiler"), &MotionMatchingController::get_profiler);
 
