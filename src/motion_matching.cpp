@@ -22,11 +22,21 @@ MotionMatchingController::MotionMatchingController() {
 
 MotionMatchingController::~MotionMatchingController() {
 	_worker.stop();
+	// Joined, not detached: the lambda captures Refs to _search/_database
+	// that keep them alive independently, but the thread also calls back
+	// into this object's _build_in_progress flag, so it must not still be
+	// running once this destructor returns.
+	if (_build_thread.joinable()) {
+		_build_thread.join();
+	}
 }
 
 void MotionMatchingController::_notification(int p_what) {
 	if (p_what == NOTIFICATION_EXIT_TREE) {
 		_worker.stop();
+		if (_build_thread.joinable()) {
+			_build_thread.join();
+		}
 	}
 }
 
@@ -184,20 +194,69 @@ void MotionMatchingController::rebuild() {
 				_schema->get_dimension(), _database->get_dimension()));
 	}
 
+	// Thins the loaded database in memory before anything is indexed, so the
+	// tree, the cache and every per-frame array below are all built against
+	// the reduced frame count -- not applied after the fact, which would mean
+	// building the full-size tree first and only saving RAM on the next
+	// rebuild. A no-op at frame_stride 1 (the default) or once already
+	// applied at this stride, so PC/Ultra exports pay nothing here.
+	if (_database.is_valid() && _resource.is_valid() && _resource->get_frame_stride() > 1) {
+		_database->reduce_frame_stride(_resource->get_frame_stride());
+	}
+
 	_worker.stop();
-	_search->build(_database);
+	if (_build_thread.joinable()) {
+		// A previous build is still running -- rare (rebuild() called again,
+		// e.g. hot-swapping a resource, before the last build finished), but
+		// MMPoseSearch::build() isn't safe to run twice concurrently against
+		// the same instance, so the new build has to wait for the old one.
+		// This is the one path where rebuild() can still block briefly; the
+		// common startup path (no prior build in flight) never hits it.
+		_build_thread.join();
+	}
+
 	_cache.clear();
 	_query.resize(_database->get_dimension());
-
 	if (_cost_function.is_valid()) {
 		_cost_function->rebuild(_schema);
 	}
-	if (_async_search) {
-		_worker.start(_search.ptr(), _cost_function.ptr());
-	}
+
+	// The actual tree build -- the expensive part -- runs off the calling
+	// thread. Refs are captured by value so _search/_database stay alive for
+	// the thread's lifetime even if something else reassigns this
+	// controller's members in the meantime.
+	// Cleared synchronously, here, before the thread starts: this is what
+	// makes is_built() (checked by every debug/query method before it
+	// touches _nodes/_indices) correctly report false for the entire
+	// window the background thread is rebuilding, with no race where a
+	// concurrent caller could see a half-cleared tree. build() would call
+	// clear() again itself regardless; doing it here too costs nothing.
+	_search->clear();
+	_async_search_requested = _async_search;
+	Ref<MMPoseSearch> search = _search;
+	Ref<MotionMatchingDatabase> database = _database;
+	_build_in_progress.store(true);
+	_build_thread = std::thread([this, search, database]() {
+		search->build(database);
+		_build_in_progress.store(false);
+	});
 
 	_current_frame = -1;
 	_force_search = true;
+}
+
+void MotionMatchingController::_finish_rebuild_if_ready() {
+	if (!_build_in_progress.load()) {
+		if (_build_thread.joinable()) {
+			_build_thread.join();
+			// Only now is it safe to start the worker: it reads _search's
+			// tree from its own thread, which must not overlap with
+			// build() still writing to that same tree.
+			if (_async_search_requested) {
+				_worker.start(_search.ptr(), _cost_function.ptr());
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +380,21 @@ void MotionMatchingController::update(double p_delta) {
 				"controller will not search or advance playback until this is fixed.");
 		return;
 	}
+
+	if (_build_in_progress.load()) {
+		// The KD-tree is still being built on a background thread (see
+		// rebuild()'s comment) -- searching against it now would race the
+		// thread still writing to it. Playback of whatever frame was
+		// already selected continues below is skipped too on purpose:
+		// there is no valid _current_frame yet on the very first rebuild,
+		// and continuing a stale one after a resource swap could be
+		// visually wrong. The character simply holds until the build
+		// finishes, which is the same trade-off the old synchronous
+		// rebuild() made by blocking _ready() outright, just without
+		// freezing the whole game to make it.
+		return;
+	}
+	_finish_rebuild_if_ready();
 
 	const uint64_t update_started = Time::get_singleton()->get_ticks_usec();
 	const float delta = (float)p_delta;
