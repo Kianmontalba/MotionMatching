@@ -19,7 +19,7 @@ static const float MM_INFINITY = std::numeric_limits<float>::infinity();
 // stamps this into format_version at finalize() time; a mismatch on load
 // means the database was built by a different addon version than the one
 // currently running.
-static const int MM_DATABASE_FORMAT_VERSION = 2; // v2: added the yaw-rate feature dimension.
+static const int MM_DATABASE_FORMAT_VERSION = 3; // v3: removed the yaw-rate feature dimension (reverted after a crash on devices with all 3 optional feature toggles on).
 
 // ---------------------------------------------------------------------------
 // Motion categories. Every database frame belongs to exactly one category.
@@ -137,10 +137,6 @@ enum MMFeatureGroup {
 	MM_GROUP_POSE_VELOCITY,
 	MM_GROUP_ROOT_VELOCITY,
 	MM_GROUP_EXTRA,
-	// Appended, not inserted between the others -- anything that already
-	// indexes weights/errors by these enum values (cost function weight
-	// tables, debug group-name arrays) keeps working unchanged.
-	MM_GROUP_YAW_RATE,
 	MM_GROUP_MAX
 };
 
