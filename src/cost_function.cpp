@@ -26,9 +26,6 @@ void MMCostFunction::set_group_weight(int p_group, float p_weight) {
 		case MM_GROUP_ROOT_VELOCITY:
 			_weight_root_velocity = p_weight;
 			break;
-		case MM_GROUP_YAW_RATE:
-			_weight_yaw_rate = p_weight;
-			break;
 		default:
 			_weight_extra = p_weight;
 			break;
@@ -48,8 +45,6 @@ float MMCostFunction::get_group_weight(int p_group) const {
 			return _weight_pose_velocity;
 		case MM_GROUP_ROOT_VELOCITY:
 			return _weight_root_velocity;
-		case MM_GROUP_YAW_RATE:
-			return _weight_yaw_rate;
 		default:
 			return _weight_extra;
 	}
@@ -120,7 +115,6 @@ void MMCostFunction::_bind_methods() {
 	MM_BIND_PROPERTY(MMCostFunction, Variant::FLOAT, weight_pose_velocity)
 	MM_BIND_PROPERTY(MMCostFunction, Variant::FLOAT, weight_root_velocity)
 	MM_BIND_PROPERTY(MMCostFunction, Variant::FLOAT, weight_extra)
-	MM_BIND_PROPERTY(MMCostFunction, Variant::FLOAT, weight_yaw_rate)
 	MM_BIND_PROPERTY(MMCostFunction, Variant::FLOAT, switch_penalty)
 
 	ClassDB::bind_method(D_METHOD("set_schema", "schema"), &MMCostFunction::set_schema);
