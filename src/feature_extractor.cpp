@@ -690,10 +690,6 @@ bool MMFeatureExtractor::_extract_clip(Skeleton3D *p_skeleton, const Ref<Animati
 			row[offset + 2] = root_velocity.z;
 		}
 
-		if (_schema->get_include_yaw_rate()) {
-			row[_schema->get_yaw_rate_offset()] = angular_velocity;
-		}
-
 		// Pose block.
 		const int bone_position_offset = _schema->get_bone_position_offset();
 		const int bone_velocity_offset = _schema->get_bone_velocity_offset();
