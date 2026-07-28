@@ -141,7 +141,11 @@ void MMDebugTools::_on_refresh_pressed() {
 		_readout->add_text(vformat("  Intent          forward %+.0f%%  right %+.0f%%  stop %.0f%%\n",
 				(double)info.get("intent_forward_percent", 0.0), (double)info.get("intent_right_percent", 0.0),
 				(double)info.get("intent_stop_percent", 0.0)));
-		_readout->add_text(vformat("  Turn intent     %+.1f deg\n", (double)info.get("turn_intent_degrees", 0.0)));
+		static const char *turn_bucket_names[] = { "none", "45", "90", "135", "180" };
+		const int turn_bucket = (int)info.get("turn_bucket", 0);
+		const char *turn_bucket_name = turn_bucket >= 0 && turn_bucket < 5 ? turn_bucket_names[turn_bucket] : "?";
+		_readout->add_text(vformat("  Turn intent     %+.1f deg  (bucket: %s)\n",
+				(double)info.get("turn_intent_degrees", 0.0), turn_bucket_name));
 		if ((bool)info.get("turn_in_place_needed", false)) {
 			_readout->push_color(Color(0.4f, 0.8f, 1.0f));
 			_readout->add_text("  Turn-in-place needed\n");
@@ -174,6 +178,72 @@ void MMDebugTools::_on_refresh_pressed() {
 	if (!filter_stats.is_empty()) {
 		_readout->add_text(vformat("\nFilter          %s / %s frames survive tags+category+speed\n",
 				filter_stats.get("after_filter", 0), filter_stats.get("total_frames", 0)));
+	}
+
+	// Pose matching heatmap + most/least used. Both read the same
+	// accumulator (get_debug_analytics()) -- see
+	// MotionMatchingController::_record_search_cost()/_record_transition()
+	// for what feeds it and when it resets.
+	const Dictionary analytics = controller->get_debug_analytics();
+	if (!analytics.is_empty()) {
+		const Array keys = analytics.keys();
+
+		// Overall average across every animation, used as the 100% baseline
+		// for the heatmap bars below -- "120%" means "costs 20% more than
+		// this database's typical animation," not an absolute unit.
+		float overall_total = 0.0f;
+		int overall_count = 0;
+		String most_used_name;
+		int most_used_count = -1;
+		String least_used_name;
+		int least_used_count = -1;
+
+		for (int i = 0; i < keys.size(); i++) {
+			const Dictionary entry = analytics[keys[i]];
+			overall_total += (float)entry.get("average_cost", 0.0f);
+			overall_count++;
+			const int play_count = (int)entry.get("play_count", 0);
+			const String clip_name = entry.get("clip_name", "");
+			if (play_count > most_used_count) {
+				most_used_count = play_count;
+				most_used_name = clip_name;
+			}
+			if (least_used_count < 0 || play_count < least_used_count) {
+				least_used_count = play_count;
+				least_used_name = clip_name;
+			}
+		}
+		const float overall_average = overall_count > 0 ? overall_total / (float)overall_count : 0.0f;
+
+		_readout->add_text("\nPose matching heatmap (relative to database average):\n");
+		for (int i = 0; i < keys.size(); i++) {
+			const Dictionary entry = analytics[keys[i]];
+			const float average_cost = (float)entry.get("average_cost", 0.0f);
+			const float percent = overall_average > 0.0001f ? (average_cost / overall_average) * 100.0f : 0.0f;
+			const int bar_length = CLAMP((int)Math::round(percent / 10.0f), 0, 20);
+			String bar;
+			for (int b = 0; b < bar_length; b++) {
+				bar += "#";
+			}
+			_readout->add_text(vformat("  %-24s %s %.0f%%\n", entry.get("clip_name", ""), bar, percent));
+		}
+
+		_readout->add_text(vformat("\nMost used       %s (%d plays)\n", most_used_name, most_used_count));
+		_readout->add_text(vformat("Least used      %s (%d plays)\n", least_used_name, least_used_count));
+	}
+
+	// Transition timeline: most recent switch last, matching the order it
+	// actually happened in.
+	const Array transitions = controller->get_debug_transitions();
+	if (transitions.size() > 0) {
+		_readout->add_text("\nRecent transitions:\n");
+		const int start = MAX(0, transitions.size() - 8);
+		for (int i = start; i < transitions.size(); i++) {
+			const Dictionary entry = transitions[i];
+			_readout->add_text(vformat("  %8.2fs  %s -> %s  (cost %.2f)\n",
+					(double)entry.get("time", 0.0), entry.get("from_clip", "(none)"),
+					entry.get("to_clip", ""), (double)entry.get("cost", 0.0)));
+		}
 	}
 }
 
