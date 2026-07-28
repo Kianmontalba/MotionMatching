@@ -259,6 +259,23 @@ private:
 	Vector3 _previous_character_position;
 	bool _has_previous_character_position = false;
 
+	// Debug-only: per-animation running stats, accumulated as the
+	// controller plays, cleared only by reset_debug_analytics(). Key is
+	// animation_id (int); value is a Dictionary {"clip_name", "search_count",
+	// "total_cost", "play_count"}. search_count/total_cost update on every
+	// search this animation's best frame was a valid result for (whether or
+	// not it won); play_count updates only when the controller actually
+	// switched into it -- see _record_search_cost()/_record_transition().
+	Dictionary _animation_stats;
+
+	// Debug-only: rolling log of actual clip switches (not every search),
+	// most recent last, capped so a long play session doesn't grow this
+	// unbounded.
+	Array _transition_log;
+
+	void _record_search_cost(int p_animation_id, float p_cost);
+	void _record_transition(const String &p_from_clip, const String &p_to_clip, float p_cost);
+
 	void _sync_from_resource();
 	void _bind_animation_tree();
 	bool _bind_animation_node(const Ref<AnimationNode> &p_node);
@@ -377,6 +394,24 @@ public:
 	// Debug-only: total vs. filter-surviving frame count for the filter the
 	// most recent search used -- see MMPoseSearch::count_filtered_frames_debug_raw().
 	Dictionary get_debug_filter_stats() const;
+
+	// Debug-only: per-animation search-cost and usage stats, accumulated
+	// since the last reset_debug_analytics() call (or controller start).
+	// {animation_id (int): {"clip_name", "search_count", "average_cost",
+	// "play_count"}, ...}. This is the same underlying data a "pose
+	// matching heatmap" would visualize (average_cost per animation) and
+	// what a "most/least used" readout would rank (play_count) -- one
+	// accumulator, two ways to read it.
+	Dictionary get_debug_analytics() const;
+
+	// Debug-only: rolling log of actual clip switches, most recent last.
+	// [{"time", "from_clip", "to_clip", "cost"}, ...]. Only real switches
+	// (_apply_match() actually changing clip), not every search.
+	Array get_debug_transitions() const;
+
+	// Clears get_debug_analytics()/get_debug_transitions()'s accumulated
+	// history. Does not affect playback.
+	void reset_debug_analytics();
 
 	// ---- Optional subsystems, opt-in by assignment ----
 
