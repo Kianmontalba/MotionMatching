@@ -383,6 +383,28 @@ Dictionary MotionMatchingDatabase::get_statistics() const {
 	return stats;
 }
 
+Vector2 MotionMatchingDatabase::get_speed_range() const {
+	if (_animations.is_empty()) {
+		return Vector2(0.0f, 0.0f);
+	}
+	float min_speed = MM_INFINITY;
+	float max_speed = 0.0f;
+	for (int i = 0; i < _animations.size(); i++) {
+		Ref<MMAnimationEntry> entry = _animations[i];
+		if (entry.is_null()) {
+			continue;
+		}
+		min_speed = MIN(min_speed, entry->get_speed_min());
+		max_speed = MAX(max_speed, entry->get_speed_max());
+	}
+	if (min_speed > max_speed) {
+		// Every entry was null -- fall back to a flat zero range rather than
+		// leaving min_speed at MM_INFINITY.
+		return Vector2(0.0f, 0.0f);
+	}
+	return Vector2(min_speed, max_speed);
+}
+
 PackedInt32Array MotionMatchingDatabase::find_frames_by_tags(int p_required, int p_blocked) const {
 	PackedInt32Array result;
 	const int frames = get_frame_count();
@@ -417,7 +439,9 @@ void MotionMatchingDatabase::_bind_methods() {
 
 	MM_BIND_PROPERTY(MotionMatchingDatabase, Variant::FLOAT, sample_rate)
 	MM_BIND_PROPERTY(MotionMatchingDatabase, Variant::INT, format_version)
+	MM_BIND_PROPERTY(MotionMatchingDatabase, Variant::INT, tag)
 	ClassDB::bind_method(D_METHOD("is_format_compatible"), &MotionMatchingDatabase::is_format_compatible);
+	ClassDB::bind_method(D_METHOD("get_speed_range"), &MotionMatchingDatabase::get_speed_range);
 
 	MM_BIND_STORAGE(MotionMatchingDatabase, Variant::PACKED_FLOAT32_ARRAY, features)
 	MM_BIND_STORAGE(MotionMatchingDatabase, Variant::PACKED_FLOAT32_ARRAY, feature_mean)
