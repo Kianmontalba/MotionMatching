@@ -32,6 +32,7 @@ private:
 	float _weight_pose_velocity = 0.75f;
 	float _weight_root_velocity = 1.0f;
 	float _weight_extra = 1.0f;
+	float _weight_yaw_rate = 1.0f;
 
 	// Extra cost added to every frame that is not a continuation of the clip
 	// currently playing. This is the hysteresis that keeps motion readable.
@@ -57,6 +58,7 @@ public:
 	MM_ACCESSORS(float, weight_pose_velocity)
 	MM_ACCESSORS(float, weight_root_velocity)
 	MM_ACCESSORS(float, weight_extra)
+	MM_ACCESSORS(float, weight_yaw_rate)
 	MM_ACCESSORS(float, switch_penalty)
 
 	// Rebuilds the per dimension weight table from the group weights.
