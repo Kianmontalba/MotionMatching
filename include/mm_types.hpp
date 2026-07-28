@@ -19,7 +19,7 @@ static const float MM_INFINITY = std::numeric_limits<float>::infinity();
 // stamps this into format_version at finalize() time; a mismatch on load
 // means the database was built by a different addon version than the one
 // currently running.
-static const int MM_DATABASE_FORMAT_VERSION = 1;
+static const int MM_DATABASE_FORMAT_VERSION = 2; // v2: added the yaw-rate feature dimension.
 
 // ---------------------------------------------------------------------------
 // Motion categories. Every database frame belongs to exactly one category.
@@ -97,6 +97,36 @@ static const uint32_t MM_TAG_MASK_ONE_SHOT =
 		MM_TAG_ATTACK | MM_TAG_RELOAD | MM_TAG_HIT;
 
 // ---------------------------------------------------------------------------
+// Turn-magnitude buckets. The 32 MM_TAG bits are already fully assigned (see
+// above), so these are deliberately NOT tag bits and NOT stored per frame --
+// they are a classification computed on demand from a continuous yaw angle
+// in degrees, on either side: from a clip's own measured net yaw (analysis
+// time) or from the trajectory's predicted turn (query time). This matches
+// how a traditional turn-in-place clip set is usually authored (Turn_45,
+// Turn_90, ...) without needing new database storage or a new tag bit.
+enum MMTurnBucket {
+	MM_TURN_NONE = 0,
+	MM_TURN_45,
+	MM_TURN_90,
+	MM_TURN_135,
+	MM_TURN_180
+};
+
+static inline MMTurnBucket mm_turn_bucket_for_degrees(float p_degrees) {
+	const float magnitude = p_degrees < 0.0f ? -p_degrees : p_degrees;
+	if (magnitude < 22.5f) {
+		return MM_TURN_NONE;
+	} else if (magnitude < 67.5f) {
+		return MM_TURN_45;
+	} else if (magnitude < 112.5f) {
+		return MM_TURN_90;
+	} else if (magnitude < 157.5f) {
+		return MM_TURN_135;
+	}
+	return MM_TURN_180;
+}
+
+// ---------------------------------------------------------------------------
 // Feature groups. Each dimension of a feature vector maps to one group, and
 // each group carries its own normalization scale and cost weight.
 // ---------------------------------------------------------------------------
@@ -107,6 +137,10 @@ enum MMFeatureGroup {
 	MM_GROUP_POSE_VELOCITY,
 	MM_GROUP_ROOT_VELOCITY,
 	MM_GROUP_EXTRA,
+	// Appended, not inserted between the others -- anything that already
+	// indexes weights/errors by these enum values (cost function weight
+	// tables, debug group-name arrays) keeps working unchanged.
+	MM_GROUP_YAW_RATE,
 	MM_GROUP_MAX
 };
 
