@@ -1,470 +1,1312 @@
-#ifndef MOTION_MATCHING_HPP
-#define MOTION_MATCHING_HPP
+#include "motion_matching.hpp"
 
-#include "cache.hpp"
-#include "cost_function.hpp"
-#include "feature.hpp"
-#include "frame_database.hpp"
-#include "mm_extra_database.hpp"
-#include "motion_warping.hpp"
-#include "pose_search.hpp"
-#include "profiler.hpp"
-#include "root_motion.hpp"
-#include "trajectory.hpp"
-#include "traversal.hpp"
+#include "animation_node_motion_matching.hpp"
 
-#include <godot_cpp/classes/animation_library.hpp>
-#include <godot_cpp/classes/animation_node.hpp>
-#include <godot_cpp/classes/animation_tree.hpp>
-#include <godot_cpp/classes/node.hpp>
-#include <godot_cpp/classes/node3d.hpp>
-#include <godot_cpp/classes/resource.hpp>
+#include <godot_cpp/classes/animation_node_blend_tree.hpp>
+#include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/physics_direct_space_state3d.hpp>
+#include <godot_cpp/classes/time.hpp>
+#include <godot_cpp/classes/world3d.hpp>
+#include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
-namespace godot {
+using namespace godot;
 
-class AnimationNodeMotionMatching;
+MotionMatchingController::MotionMatchingController() {
+	_trajectory.instantiate();
+	_root_motion.instantiate();
+	_search.instantiate();
+	_cache.resize(1024);
+	_profiler.instantiate();
+}
+
+MotionMatchingController::~MotionMatchingController() {
+	_worker.stop();
+	// Joined, not detached: the lambda captures Refs to _search/_database
+	// that keep them alive independently, but the thread also calls back
+	// into this object's _build_in_progress flag, so it must not still be
+	// running once this destructor returns.
+	if (_build_thread.joinable()) {
+		_build_thread.join();
+	}
+}
+
+void MotionMatchingController::_notification(int p_what) {
+	if (p_what == NOTIFICATION_EXIT_TREE) {
+		_worker.stop();
+		if (_build_thread.joinable()) {
+			_build_thread.join();
+		}
+	}
+}
+
+void MotionMatchingController::_ready() {
+	if (Engine::get_singleton()->is_editor_hint()) {
+		set_process(false);
+		set_physics_process(false);
+		return;
+	}
+
+	if (!_character_path.is_empty()) {
+		_character = Object::cast_to<Node3D>(get_node_or_null(_character_path));
+	}
+	if (_character == nullptr) {
+		_character = Object::cast_to<Node3D>(get_parent());
+	}
+	if (_character == nullptr) {
+		WARN_PRINT_ONCE(
+				"MotionMatchingController has no resolvable character (character_path is empty or "
+				"invalid, and the parent node is not a Node3D). Trajectory prediction, traversal "
+				"probing, and root motion warping will all behave as if the character never moves.");
+	}
+
+	_sync_from_resource();
+	_bind_animation_tree();
+	rebuild();
+
+	set_physics_process(_auto_update);
+}
+
+void MotionMatchingController::_process(double p_delta) {
+	// Playback advances on the render tick so the pose stays smooth even when
+	// physics runs at a lower rate. Searching happens in _physics_process.
+}
+
+void MotionMatchingController::_physics_process(double p_delta) {
+	if (_auto_update) {
+		update(p_delta);
+	}
+}
+
+void MotionMatchingController::_sync_from_resource() {
+	if (_resource.is_null()) {
+		return;
+	}
+
+	// MotionMatchingResource now holds an MMExtraDatabase (boxes of named
+	// databases) instead of a single flat database directly. The controller
+	// itself is unchanged: it still runs against exactly one
+	// MotionMatchingDatabase, whichever one MMExtraDatabase currently marks
+	// active.
+	Ref<MMExtraDatabase> extra_database = _resource->get_database();
+	_database = extra_database.is_valid() ? extra_database->get_active_database() : Ref<MotionMatchingDatabase>();
+	_schema = _resource->get_schema();
+	if (_schema.is_null() && _database.is_valid()) {
+		_schema = _database->get_schema();
+	}
+	if (_schema.is_null()) {
+		_schema = MMFeatureSchema::make_default();
+	}
+
+	_cost_function = _resource->get_cost_function();
+	if (_cost_function.is_null()) {
+		_cost_function.instantiate();
+	}
+	_cost_function->rebuild(_schema);
+
+	_trajectory->configure(_schema);
+	_trajectory->set_halflife_position(_resource->get_trajectory_halflife_position());
+	_trajectory->set_halflife_direction(_resource->get_trajectory_halflife_direction());
+	_trajectory->set_max_speed(_resource->get_max_speed());
+
+	_root_motion->set_database(_database);
+	_query.resize(_schema->get_dimension());
+}
+
+void MotionMatchingController::_bind_animation_tree() {
+	if (_animation_tree_path.is_empty()) {
+		return;
+	}
+	_animation_tree = Object::cast_to<AnimationTree>(get_node_or_null(_animation_tree_path));
+	if (_animation_tree == nullptr) {
+		return;
+	}
+	_bind_animation_node(Ref<AnimationNode>(_animation_tree->get_tree_root().ptr()));
+}
+
+// Walks the tree so the node can sit anywhere: as the root, or as one node
+// inside a BlendTree with a turn in place layer on top of it.
+bool MotionMatchingController::_bind_animation_node(const Ref<AnimationNode> &p_node) {
+	if (p_node.is_null()) {
+		return false;
+	}
+
+	Ref<AnimationNodeMotionMatching> node = p_node;
+	if (node.is_valid()) {
+		node->bind_controller(this);
+		_animation_node = node.ptr();
+		return true;
+	}
+
+	// NOTE: recursing into an AnimationNodeBlendTree to find a nested
+	// AnimationNodeMotionMatching automatically is not supported, because
+	// AnimationNodeBlendTree::get_node_list() is not exposed by the
+	// godot-cpp API version this addon is built against. If this node is
+	// not the AnimationTree's root, assign animation_tree_path so it points
+	// somewhere the node can be resolved directly instead.
+	return false;
+}
+
+void MotionMatchingController::set_resource(const Ref<MotionMatchingResource> &p_resource) {
+	_resource = p_resource;
+	if (is_inside_tree()) {
+		// Stop the worker before anything below can reassign/drop the Refs
+		// (_cost_function, _database, _schema) it may still be holding a raw
+		// pointer into from an in-flight async search. rebuild() restarts it
+		// once the new resource's objects are in place.
+		_worker.stop();
+		_sync_from_resource();
+		rebuild();
+	}
+}
+
+void MotionMatchingController::set_character_path(const NodePath &p_path) {
+	_character_path = p_path;
+	if (is_inside_tree()) {
+		_character = Object::cast_to<Node3D>(get_node_or_null(p_path));
+	}
+}
+
+void MotionMatchingController::set_animation_tree_path(const NodePath &p_path) {
+	_animation_tree_path = p_path;
+	if (is_inside_tree()) {
+		_bind_animation_tree();
+	}
+}
+
+void MotionMatchingController::rebuild() {
+	if (_database.is_null() || _database->get_frame_count() == 0) {
+		return;
+	}
+
+	if (!_database->is_format_compatible()) {
+		WARN_PRINT_ONCE(vformat(
+				"Motion matching database format_version (%d) does not match what this build of "
+				"the addon expects (%d). It was likely built by a different addon version; "
+				"rebuilding it from the editor is recommended.",
+				_database->get_format_version(), MM_DATABASE_FORMAT_VERSION));
+	}
+	if (_schema.is_valid() && _schema->get_dimension() != _database->get_dimension()) {
+		WARN_PRINT_ONCE(vformat(
+				"Schema dimension (%d) does not match database dimension (%d); search results "
+				"will likely be meaningless. Rebuild the database with the schema currently "
+				"assigned, or assign the schema this database was actually built with.",
+				_schema->get_dimension(), _database->get_dimension()));
+	}
+
+	_worker.stop();
+	if (_build_thread.joinable()) {
+		// A previous build is still running -- rare (rebuild() called again,
+		// e.g. hot-swapping a resource, before the last build finished), but
+		// MMPoseSearch::build() isn't safe to run twice concurrently against
+		// the same instance, so the new build has to wait for the old one.
+		// This is the one path where rebuild() can still block briefly; the
+		// common startup path (no prior build in flight) never hits it.
+		_build_thread.join();
+	}
+
+	_cache.clear();
+	_query.resize(_database->get_dimension());
+	if (_cost_function.is_valid()) {
+		_cost_function->rebuild(_schema);
+	}
+
+	// The actual tree build -- the expensive part -- runs off the calling
+	// thread. Refs are captured by value so _search/_database stay alive for
+	// the thread's lifetime even if something else reassigns this
+	// controller's members in the meantime.
+	// Cleared synchronously, here, before the thread starts: this is what
+	// makes is_built() (checked by every debug/query method before it
+	// touches _nodes/_indices) correctly report false for the entire
+	// window the background thread is rebuilding, with no race where a
+	// concurrent caller could see a half-cleared tree. build() would call
+	// clear() again itself regardless; doing it here too costs nothing.
+	_search->clear();
+	_async_search_requested = _async_search;
+	Ref<MMPoseSearch> search = _search;
+	Ref<MotionMatchingDatabase> database = _database;
+	_build_in_progress.store(true);
+	_build_thread = std::thread([this, search, database]() {
+		search->build(database);
+		_build_in_progress.store(false);
+	});
+
+	_current_frame = -1;
+	_force_search = true;
+}
+
+void MotionMatchingController::_finish_rebuild_if_ready() {
+	if (!_build_in_progress.load()) {
+		if (_build_thread.joinable()) {
+			_build_thread.join();
+			// Only now is it safe to start the worker: it reads _search's
+			// tree from its own thread, which must not overlap with
+			// build() still writing to that same tree.
+			if (_async_search_requested) {
+				_worker.start(_search.ptr(), _cost_function.ptr());
+			}
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
-// MotionMatchingResource
-//
-// The asset a designer assigns in the inspector. It carries everything the
-// runtime needs, so swapping a weapon set or an AI movement set is a single
-// resource swap:
-//
-//   AnimationTree
-//     └── AnimationNodeMotionMatching
-//           └── MotionMatchingController
-//                 └── MotionMatching.tres  <- this
+// Intent API
 // ---------------------------------------------------------------------------
-class MotionMatchingResource : public Resource {
-	GDCLASS(MotionMatchingResource, Resource);
 
-private:
-	Ref<AnimationLibrary> _animation_library;
-	// Was a single Ref<MotionMatchingDatabase>. Now an MMExtraDatabase --
-	// an add-only list of MMBoxAnimation (one per weapon/character set,
-	// e.g. "Normal Rifle", "Pistol", "Zombie"), each an add-only list of
-	// named MotionMatchingDatabase entries ("Walk", "Sprint", "Jump", ...).
-	// Exactly one of those still runs at a time -- see
-	// MMExtraDatabase::get_active_database().
-	Ref<MMExtraDatabase> _database;
-	Ref<MMFeatureSchema> _schema;
-	Ref<MMCostFunction> _cost_function;
-	// Path (relative to the scene this resource is used in) to the
-	// Skeleton3D the database editor should build against. Stored on the
-	// resource itself, same as animation_library, so a node picked -- or
-	// dropped -- in the Database dock is still there the next time this
-	// resource is opened, instead of living only in the dock's own LineEdit.
-	NodePath _skeleton_path;
+void MotionMatchingController::set_velocity(const Vector3 &p_velocity) {
+	_velocity = p_velocity;
+}
 
-	// Optional manual overrides for just these two roles. Left empty, the
-	// extractor's auto-detect decides them like every other role; set by
-	// hand here (from the Database dock), MMSkeletonProfile locks them and
-	// keeps them through every future auto-detect pass -- these are the only
-	// two roles that commonly need a nudge (foot IK/contacts are sensitive to
-	// exactly which bone is "the foot"), so this stays two fields instead of
-	// the full 22-role manual mapping that used to live in the dock.
-	String _left_foot_override;
-	String _right_foot_override;
+void MotionMatchingController::set_desired_velocity(const Vector3 &p_velocity) {
+	_desired_velocity = p_velocity;
+}
 
-	// Search settings.
-	float _search_interval = 0.0f; // 0 = evaluate every frame.
-	float _minimum_clip_time = 0.12f;
-	float _improvement_threshold = 0.12f; // Required relative gain before switching.
-	float _switch_cooldown = 0.05f;
-	int _max_comparisons = 0; // 0 = unlimited.
-	float _search_budget_msec = 2.0f;
-	int _neighborhood_radius = 12;
+void MotionMatchingController::set_direction(const Vector3 &p_direction) {
+	set_facing(p_direction);
+	_desired_facing = p_direction.length_squared() > 0.000001f ? p_direction.normalized() : _desired_facing;
+}
 
-	// Playback settings.
-	float _blend_time = 0.15f;
-	float _minimum_blend_time = 0.06f;
-	bool _allow_same_clip_jump = false;
+void MotionMatchingController::set_facing(const Vector3 &p_facing) {
+	if (p_facing.length_squared() > 0.000001f) {
+		_facing = p_facing.normalized();
+	}
+}
 
-	// Trajectory settings.
-	float _trajectory_halflife_position = 0.12f;
-	float _trajectory_halflife_direction = 0.10f;
-	float _max_speed = 6.0f;
+void MotionMatchingController::set_ground_state(bool p_grounded) {
+	if (p_grounded && !_grounded) {
+		// Touchdown. Open a short window in which landing clips are the only
+		// sensible answer, then let locomotion take over again.
+		_landing_timer = 0.25f;
+		_force_search = true;
+	} else if (!p_grounded && _grounded) {
+		_force_search = true;
+	}
+	_grounded = p_grounded;
+}
 
-	int _quality = MM_QUALITY_ULTRA;
-	bool _debug_enabled = false;
+void MotionMatchingController::set_fall_distance(float p_distance) {
+	_fall_distance = p_distance;
+}
 
-protected:
-	static void _bind_methods();
+void MotionMatchingController::request_jump() {
+	if (!_grounded) {
+		return;
+	}
+	_jump_requested = true;
+	_force_search = true;
+}
 
-public:
-	void set_animation_library(const Ref<AnimationLibrary> &p_library);
-	Ref<AnimationLibrary> get_animation_library() const { return _animation_library; }
+void MotionMatchingController::set_trajectory(const PackedVector3Array &p_positions,
+		const PackedVector3Array &p_directions) {
+	_trajectory->set_external_samples(p_positions, p_directions);
+}
 
-	void set_database(const Ref<MMExtraDatabase> &p_database);
-	Ref<MMExtraDatabase> get_database() const { return _database; }
+void MotionMatchingController::set_traversal(const Ref<MMTraversal> &p_traversal) {
+	_traversal = p_traversal;
+}
 
-	void set_schema(const Ref<MMFeatureSchema> &p_schema);
-	Ref<MMFeatureSchema> get_schema() const { return _schema; }
+void MotionMatchingController::set_motion_warp(const Ref<MMMotionWarp> &p_warp) {
+	_motion_warp = p_warp;
+}
 
-	void set_cost_function(const Ref<MMCostFunction> &p_cost);
-	Ref<MMCostFunction> get_cost_function() const { return _cost_function; }
+void MotionMatchingController::begin_warp(const Transform3D &p_target) {
+	if (_motion_warp.is_null() || _character == nullptr || _current_animation < 0 || _database.is_null()) {
+		return;
+	}
+	Ref<MMAnimationEntry> entry = _database->get_animation_entry(_current_animation);
+	// Defaults to warping for the rest of the currently playing clip, since
+	// that is the only clip-length information the controller has without
+	// assuming anything about what the target represents. A caller that wants
+	// a different window can call get_motion_warp()->add_window() directly
+	// instead of (or in addition to) this.
+	const float end_time = entry.is_valid() ? (float)entry->get_length() : (float)_current_time;
 
-	MM_ACCESSORS(NodePath, skeleton_path)
-	MM_ACCESSORS(String, left_foot_override)
-	MM_ACCESSORS(String, right_foot_override)
+	_motion_warp->clear_windows();
+	_motion_warp->begin(_character->get_global_transform());
+	_motion_warp->add_window((float)_current_time, end_time, p_target);
+}
 
-	MM_ACCESSORS(float, search_interval)
-	MM_ACCESSORS(float, minimum_clip_time)
-	MM_ACCESSORS(float, improvement_threshold)
-	MM_ACCESSORS(float, switch_cooldown)
-	MM_ACCESSORS(int, max_comparisons)
-	MM_ACCESSORS(float, search_budget_msec)
-	MM_ACCESSORS(int, neighborhood_radius)
-	MM_ACCESSORS(float, blend_time)
-	MM_ACCESSORS(float, minimum_blend_time)
-	MM_ACCESSORS(bool, allow_same_clip_jump)
-	MM_ACCESSORS(float, trajectory_halflife_position)
-	MM_ACCESSORS(float, trajectory_halflife_direction)
-	MM_ACCESSORS(float, max_speed)
-	MM_ACCESSORS(int, quality)
-	MM_ACCESSORS(bool, debug_enabled)
+void MotionMatchingController::end_warp() {
+	if (_motion_warp.is_valid()) {
+		_motion_warp->end();
+	}
+}
 
-	// Structured pre-flight check, meant to be called once (typically from the
-	// editor or on _ready()) rather than every frame. Returns an array of
-	// Dictionaries shaped like MMAnimationLibraryTools::validate_library()'s
-	// issue list ("severity", "message"), so the same UI pattern can render
-	// either. An empty array means nothing was found wrong; it does not by
-	// itself prove the resource will produce good matches, only that the
-	// pieces are internally consistent enough to try.
-	Array validate() const;
-};
+void MotionMatchingController::set_required_tags(int p_tags) {
+	_required_tags = (uint32_t)p_tags;
+}
+
+void MotionMatchingController::set_blocked_tags(int p_tags) {
+	_blocked_tags = (uint32_t)p_tags;
+}
+
+void MotionMatchingController::set_category_mask(int p_mask) {
+	_category_mask = (uint32_t)p_mask;
+}
+
+void MotionMatchingController::lock_category(int p_category, float p_duration) {
+	_locked_category = (uint32_t)p_category;
+	_category_lock_timer = p_duration;
+}
+
+void MotionMatchingController::release_category() {
+	_locked_category = MM_CATEGORY_MAX;
+	_category_lock_timer = 0.0f;
+}
+
+void MotionMatchingController::force_search() {
+	_force_search = true;
+}
 
 // ---------------------------------------------------------------------------
-// MotionMatchingController
-//
-// The brain. The player script only reports intent; every animation decision
-// happens in here.
-//
-//   _mm.set_velocity(velocity)
-//   _mm.set_desired_velocity(input_direction * target_speed)
-//   _mm.set_facing(-global_transform.basis.z)
-//   _mm.set_ground_state(is_on_floor())
-//   _mm.update(delta)
-//
-// The controller never plays anything itself. It publishes a decision (clip,
-// time, blend weight) that AnimationNodeMotionMatching consumes inside the
-// AnimationTree, which is what makes true frame jumping possible.
+// Tick
 // ---------------------------------------------------------------------------
-class MotionMatchingController : public Node {
-	GDCLASS(MotionMatchingController, Node);
 
-private:
-	Ref<MotionMatchingResource> _resource;
-	Ref<MotionMatchingDatabase> _database;
-	Ref<MMFeatureSchema> _schema;
-	Ref<MMCostFunction> _cost_function;
-	Ref<MMPoseSearch> _search;
-	Ref<MMTrajectory> _trajectory;
-	Ref<MMRootMotion> _root_motion;
+void MotionMatchingController::update(double p_delta) {
+	if (_database.is_null() || _database->get_frame_count() == 0 || _schema.is_null()) {
+		WARN_PRINT_ONCE(
+				"MotionMatchingController::update() called with no usable database/schema "
+				"(resource unassigned, database empty, or rebuild() never called). The "
+				"controller will not search or advance playback until this is fixed.");
+		return;
+	}
 
-	MMSearchCache _cache;
-	MMSearchWorker _worker;
-	bool _async_search = false;
-	bool _auto_update = true;
-	uint64_t _pending_request = 0;
-	uint64_t _pending_cache_key = 0;
+	if (_build_in_progress.load()) {
+		// The KD-tree is still being built on a background thread (see
+		// rebuild()'s comment) -- searching against it now would race the
+		// thread still writing to it. Playback of whatever frame was
+		// already selected continues below is skipped too on purpose:
+		// there is no valid _current_frame yet on the very first rebuild,
+		// and continuing a stale one after a resource swap could be
+		// visually wrong. The character simply holds until the build
+		// finishes, which is the same trade-off the old synchronous
+		// rebuild() made by blocking _ready() outright, just without
+		// freezing the whole game to make it.
+		return;
+	}
+	_finish_rebuild_if_ready();
 
-	// Search-phase profiling. Always created (cheap, and MMProfiler's own
-	// design is exactly "attach and read a report"), but only ever fed real
-	// numbers when a search actually runs — a cache hit or a skipped frame
-	// records nothing, which is the honest thing to report.
-	Ref<MMProfiler> _profiler;
+	const uint64_t update_started = Time::get_singleton()->get_ticks_usec();
+	const float delta = (float)p_delta;
+	_last_delta_time = delta;
 
-	// Lightweight per-phase timings that don't fit MMProfiler's search-shaped
-	// Sample struct (query build, continuation evaluation, switch application,
-	// total update). Measured with the same Time::get_ticks_usec() pattern
-	// pose_search.cpp already uses for search_time_usec, and surfaced through
-	// get_debug_info() rather than through MMProfiler, which this leaves
-	// untouched.
-	double _last_query_build_usec = 0.0;
-	double _last_continuation_usec = 0.0;
-	double _last_switch_usec = 0.0;
-	double _last_update_usec = 0.0;
-	float _last_delta_time = 0.0f;
+	// Debug-only: how far the character actually moved since the previous
+	// update() call, for comparison against the root motion the animation
+	// produced (see consume_root_motion()'s comment for the one-tick offset
+	// this comparison carries).
+	if (_character != nullptr) {
+		const Vector3 current_position = _character->get_global_transform().origin;
+		if (_has_previous_character_position) {
+			_last_actual_movement_delta = current_position - _previous_character_position;
+		}
+		_previous_character_position = current_position;
+		_has_previous_character_position = true;
+	}
 
-	// Optional traversal detection. Null by default: assigning one is what
-	// opts a character into traversal-aware search filtering. No traversal
-	// logic runs, and no raycast is performed, unless a caller sets this.
-	Ref<MMTraversal> _traversal;
+	_time_since_search += delta;
+	_time_in_clip += delta;
+	if (_switch_cooldown_timer > 0.0f) {
+		_switch_cooldown_timer -= delta;
+	}
+	if (_landing_timer > 0.0f) {
+		_landing_timer -= delta;
+	}
+	if (_category_lock_timer > 0.0f) {
+		_category_lock_timer -= delta;
+		if (_category_lock_timer <= 0.0f) {
+			release_category();
+		}
+	}
+	_time_since_grounded = _grounded ? 0.0f : _time_since_grounded + delta;
 
-	// Optional motion warping. Null by default; same opt-in pattern as
-	// traversal. consume_root_motion() only consults this when it is both
-	// assigned and active.
-	Ref<MMMotionWarp> _motion_warp;
+	// Trajectory first: the search is only as good as the intent it is given.
+	const Transform3D character_transform =
+			_character != nullptr ? _character->get_global_transform() : Transform3D();
+	_trajectory->set_state(character_transform.origin, _velocity, _facing);
+	_trajectory->set_desired_velocity(_desired_velocity);
+	_trajectory->set_desired_facing(_desired_facing);
+	_trajectory->update(p_delta);
 
-	NodePath _character_path;
-	NodePath _animation_tree_path;
-	Node3D *_character = nullptr;
-	AnimationTree *_animation_tree = nullptr;
-	AnimationNodeMotionMatching *_animation_node = nullptr;
+	// Optional: only probes when a traversal instance has been assigned.
+	_evaluate_traversal();
 
-	// Intent, written by the game.
-	Vector3 _velocity;
-	Vector3 _desired_velocity;
-	Vector3 _facing = Vector3(0, 0, -1);
-	Vector3 _desired_facing = Vector3(0, 0, -1);
-	bool _grounded = true;
-	bool _jump_requested = false;
-	float _time_since_grounded = 0.0f;
-	float _fall_distance = 0.0f;
-	float _landing_timer = 0.0f;
-	bool _force_search = false;
+	_advance_playback(p_delta);
 
-	// Gameplay gating.
-	uint32_t _required_tags = 0;
-	uint32_t _blocked_tags = 0;
-	uint32_t _category_mask = 0xFFFFFFFFu;
-	uint32_t _locked_category = MM_CATEGORY_MAX; // MAX = not locked.
-	float _category_lock_timer = 0.0f;
+	// Collect an async result before deciding whether to ask another question.
+	if (_async_search && _worker.is_running()) {
+		MMSearchWorker::Response response;
+		if (_worker.poll(response) && response.id == _pending_request) {
+			_stats = response.stats;
+			_profiler->record(_stats.search_time_usec, _stats.frames_compared,
+					_stats.candidates_visited, _stats.nodes_visited, _stats.budget_exceeded);
+			_consume_result(response.result);
+			_pending_request = 0;
+		}
+	}
 
-	// Playback state.
-	int _current_frame = -1;
-	int _previous_frame = -1;
-	int _current_animation = -1;
-	int _previous_animation = -1;
-	StringName _current_clip;
-	double _current_time = 0.0;
-	StringName _previous_clip;
-	double _previous_time = 0.0;
-	float _blend_weight = 1.0f;
-	float _blend_speed = 0.0f;
-	bool _seek_request = false;
+	const float interval = _resource.is_valid() ? _resource->get_search_interval() : 0.0f;
+	const bool due = _force_search || _current_frame < 0 || _time_since_search >= interval;
 
-	float _time_since_search = 0.0f;
-	float _time_in_clip = 0.0f;
-	float _switch_cooldown_timer = 0.0f;
+	if (due) {
+		_run_search();
+		_time_since_search = 0.0f;
+		_force_search = false;
+	}
 
-	// Scratch buffers, allocated once.
-	Vector<float> _query;
-	MMSearchStats _stats;
-	MMMatchResult _last_result;
-	float _continuation_cost = 0.0f;
+	const int previous_frame = _blend_weight < 1.0f ? _previous_frame : -1;
+	_root_motion->update(p_delta, _current_frame, previous_frame, _blend_weight);
 
-	// Debug-only: root motion vs. actual character movement. Populated by
-	// consume_root_motion() (the delta the animation produced) and by
-	// update() (the character's actual world-position change since the
-	// previous update() call). The two are one tick offset from each other
-	// -- the game applies the consumed delta sometime after this frame's
-	// update() runs -- so this is a same-tick-length comparison, not a
-	// same-instant one; close enough to show a mismatch (a wall blocking
-	// root motion, warp altering it, and so on), not exact frame alignment.
-	Vector3 _last_root_motion_delta;
-	Vector3 _last_actual_movement_delta;
-	Vector3 _previous_character_position;
-	bool _has_previous_character_position = false;
+	_last_update_usec = (double)(Time::get_singleton()->get_ticks_usec() - update_started);
+}
 
-	// rebuild() used to call _search->build() directly on whatever thread
-	// called it -- for a database with many frames and a wide feature
-	// vector (more tracked bones, root velocity, yaw rate, extra
-	// dimensions all add up), that is expensive enough to block _ready()
-	// for a long time on weak hardware. That block is what was actually
-	// behind reports of the game "hanging at the splash screen" instead of
-	// starting -- not a crash, just a very long synchronous wait with
-	// nothing rendered yet. Building on a thread instead means update()
-	// has to explicitly skip searching until the build finishes; see its
-	// guard clause and _finish_rebuild_if_ready().
-	std::thread _build_thread;
-	std::atomic<bool> _build_in_progress{ false };
-	// What rebuild() wants to happen once the in-flight build finishes:
-	// clearing the cache, resizing the query, rebuilding the cost function,
-	// and starting the async search worker (only that last part actually
-	// depends on the tree existing; the rest could run immediately, but
-	// keeping all of it together in one place is what makes rebuild()
-	// safe to call again while a previous build is still running).
-	bool _async_search_requested = false;
+void MotionMatchingController::_build_query() {
+	const int dimension = _schema->get_dimension();
+	if (_query.size() != dimension) {
+		_query.resize(dimension);
+	}
 
-	void _finish_rebuild_if_ready();
+	float *query = _query.ptrw();
+	for (int i = 0; i < dimension; i++) {
+		query[i] = 0.0f;
+	}
 
-	// Debug-only: per-animation running stats, accumulated as the
-	// controller plays, cleared only by reset_debug_analytics(). Key is
-	// animation_id (int); value is a Dictionary {"clip_name", "search_count",
-	// "total_cost", "play_count"}. search_count/total_cost update on every
-	// search this animation's best frame was a valid result for (whether or
-	// not it won); play_count updates only when the controller actually
-	// switched into it -- see _record_search_cost()/_record_transition().
-	Dictionary _animation_stats;
+	// The character basis is yaw only. Pitch and roll never belong in a
+	// locomotion query; they would make a slope invalidate every match.
+	Vector3 forward = _facing;
+	forward.y = 0.0f;
+	if (forward.length_squared() < 0.000001f) {
+		forward = Vector3(0, 0, -1);
+	} else {
+		forward.normalize();
+	}
+	const Basis basis = Basis::looking_at(forward, Vector3(0, 1, 0));
 
-	// Debug-only: rolling log of actual clip switches (not every search),
-	// most recent last, capped so a long play session doesn't grow this
-	// unbounded.
-	Array _transition_log;
+	_trajectory->write_features(query, _schema, basis);
 
-	void _record_search_cost(int p_animation_id, float p_cost);
-	void _record_transition(const String &p_from_clip, const String &p_to_clip, float p_cost);
+	if (_schema->get_include_root_velocity()) {
+		const Vector3 local_velocity = basis.inverse().xform(_velocity);
+		const int offset = _schema->get_root_velocity_offset();
+		query[offset + 0] = local_velocity.x;
+		query[offset + 1] = local_velocity.y;
+		query[offset + 2] = local_velocity.z;
+	}
 
-	void _sync_from_resource();
-	void _bind_animation_tree();
-	bool _bind_animation_node(const Ref<AnimationNode> &p_node);
-	void _build_query();
-	MMSearchFilter _build_filter() const;
-	MMSearchContext _build_context() const;
-	void _run_search();
-	void _consume_result(const MMMatchResult &p_result);
-	bool _should_switch(const MMMatchResult &p_candidate) const;
-	void _apply_match(const MMMatchResult &p_match);
-	void _advance_playback(double p_delta);
-	float _evaluate_continuation();
-	int _current_database_frame() const;
-	uint64_t _make_cache_key(const MMSearchFilter &p_filter) const;
-	void _evaluate_traversal();
+	_database->normalize_query_ptr(query);
 
-protected:
-	static void _bind_methods();
-	void _notification(int p_what);
+	// The pose half of the query is the pose the character is actually in.
+	// Reading it straight from the frame that is playing is both free and
+	// exact, and it is what makes the next match continue the motion rather
+	// than restart it.
+	if (_current_frame >= 0 && _current_frame < _database->get_frame_count()) {
+		const float *current = _database->get_frame_features(_current_frame);
+		const int start = _schema->get_bone_position_offset();
+		for (int i = start; i < dimension; i++) {
+			query[i] = current[i];
+		}
+	}
+}
 
-public:
-	MotionMatchingController();
-	~MotionMatchingController();
+MMSearchFilter MotionMatchingController::_build_filter() const {
+	MMSearchFilter filter;
+	filter.required_tags = _required_tags;
+	filter.blocked_tags = _blocked_tags;
+	filter.category_mask = _category_mask;
 
-	void _ready() override;
-	void _process(double p_delta) override;
-	void _physics_process(double p_delta) override;
+	if (_locked_category != MM_CATEGORY_MAX) {
+		filter.category_mask = 1u << _locked_category;
+		return filter;
+	}
 
-	void set_resource(const Ref<MotionMatchingResource> &p_resource);
-	Ref<MotionMatchingResource> get_resource() const { return _resource; }
+	// Optional: only ever non-NONE when a traversal instance is assigned and
+	// _evaluate_traversal() found an obstacle this tick. The specific tags
+	// required for each traversal type are computed by MMTraversal itself
+	// (get_required_tags()), not decided here — this is wiring, not gameplay
+	// policy.
+	if (_traversal.is_valid() && _traversal->get_detected_type() != MMTraversal::TRAVERSAL_NONE) {
+		filter.category_mask = 1u << MM_CATEGORY_TRAVERSAL;
+		filter.any_tags = (uint32_t)_traversal->get_required_tags();
+		return filter;
+	}
 
-	void set_character_path(const NodePath &p_path);
-	NodePath get_character_path() const { return _character_path; }
+	if (_jump_requested && _grounded) {
+		filter.category_mask = 1u << MM_CATEGORY_AIRBORNE;
+		filter.any_tags = MM_TAG_JUMP;
+		return filter;
+	}
 
-	void set_animation_tree_path(const NodePath &p_path);
-	NodePath get_animation_tree_path() const { return _animation_tree_path; }
+	if (!_grounded) {
+		filter.category_mask = 1u << MM_CATEGORY_AIRBORNE;
+		// A short coyote window still allows the takeoff clip; after that only
+		// falling makes sense.
+		filter.any_tags = _time_since_grounded > 0.35f ? (uint32_t)MM_TAG_FALL
+													   : (uint32_t)(MM_TAG_JUMP | MM_TAG_FALL);
+		return filter;
+	}
 
-	MM_ACCESSORS(bool, async_search)
-	MM_ACCESSORS(bool, auto_update)
+	if (_landing_timer > 0.0f) {
+		filter.category_mask = (1u << MM_CATEGORY_AIRBORNE) | (1u << MM_CATEGORY_LOCOMOTION);
+		filter.any_tags = MM_TAG_LAND | MM_TAG_ROLL | MM_TAG_IDLE | MM_TAG_WALK | MM_TAG_JOG |
+				MM_TAG_RUN | MM_TAG_SPRINT;
+		return filter;
+	}
 
-	// ---- Intent API, called by the player or the AI ----
-	void set_velocity(const Vector3 &p_velocity);
-	Vector3 get_velocity() const { return _velocity; }
-	void set_desired_velocity(const Vector3 &p_velocity);
-	void set_direction(const Vector3 &p_direction); // Shorthand for desired facing.
-	void set_facing(const Vector3 &p_facing);
-	void set_ground_state(bool p_grounded);
-	bool get_ground_state() const { return _grounded; }
-	void set_fall_distance(float p_distance);
-	void request_jump();
+	// Grounded and settled: airborne and traversal clips are off the table
+	// unless a gameplay system explicitly opens them.
+	filter.category_mask &= ~(1u << MM_CATEGORY_AIRBORNE);
+	filter.category_mask &= ~(1u << MM_CATEGORY_TRAVERSAL);
+	filter.blocked_tags |= MM_TAG_JUMP | MM_TAG_FALL;
+	return filter;
+}
 
-	// Feeds an externally computed trajectory, for AI navigation paths or for
-	// a networked replay. Overrides the internal predictor for this tick.
-	void set_trajectory(const PackedVector3Array &p_positions, const PackedVector3Array &p_directions);
-	Ref<MMTrajectory> get_trajectory() const { return _trajectory; }
+MMSearchContext MotionMatchingController::_build_context() const {
+	MMSearchContext context;
+	context.continuation_frame = _current_database_frame();
+	context.previous_frame = _last_result.frame_index;
+	context.neighborhood_radius = _resource.is_valid() ? _resource->get_neighborhood_radius() : 12;
+	context.max_comparisons = _resource.is_valid() ? _resource->get_max_comparisons() : 0;
+	return context;
+}
 
-	void set_required_tags(int p_tags);
-	int get_required_tags() const { return (int)_required_tags; }
-	void set_blocked_tags(int p_tags);
-	int get_blocked_tags() const { return (int)_blocked_tags; }
-	void set_category_mask(int p_mask);
-	int get_category_mask() const { return (int)_category_mask; }
+int MotionMatchingController::_current_database_frame() const {
+	if (_current_animation < 0) {
+		return -1;
+	}
+	return _database->get_frame_at_time(_current_animation, (float)_current_time);
+}
 
-	// Locks the search to one category until it is released or the timer runs
-	// out. This is what stops a jump from being interrupted by a walk clip.
-	void lock_category(int p_category, float p_duration);
-	void release_category();
+// Optional. Does nothing unless a traversal instance has been assigned and
+// the character is on the ground and resolvable — a probe while airborne, or
+// with no character to probe from, would not mean anything.
+void MotionMatchingController::_evaluate_traversal() {
+	if (_traversal.is_null()) {
+		return;
+	}
+	if (_character == nullptr || !_grounded) {
+		_traversal->clear();
+		return;
+	}
+	Ref<World3D> world = _character->get_world_3d();
+	if (world.is_null()) {
+		return;
+	}
+	PhysicsDirectSpaceState3D *space = world->get_direct_space_state();
+	if (space == nullptr) {
+		return;
+	}
 
-	// Main tick. Call it manually when auto_update is off.
-	void update(double p_delta);
-	void force_search();
+	const MMTraversal::TraversalType detected =
+			_traversal->probe(space, _character->get_global_transform(), _trajectory);
+	if (detected != MMTraversal::TRAVERSAL_NONE) {
+		// The game decides what a detected traversal actually means — start a
+		// motion warp toward it, play a one-shot animation, ignore it, etc.
+		// The controller only reports what geometry it found.
+		emit_signal("traversal_requested", (int)detected, _traversal->get_top_point());
+	}
+}
 
-	// ---- Output, consumed by AnimationNodeMotionMatching ----
-	StringName get_current_clip() const { return _current_clip; }
-	double get_current_time() const { return _current_time; }
-	StringName get_previous_clip() const { return _previous_clip; }
-	double get_previous_time() const { return _previous_time; }
-	float get_blend_weight() const { return _blend_weight; }
-	bool take_seek_request();
+float MotionMatchingController::_evaluate_continuation() {
+	const int frame = _current_database_frame();
+	if (frame < 0) {
+		return MM_INFINITY;
+	}
+	const int dimension = _database->get_dimension();
+	return _cost_function->compute_raw(_query.ptr(), _database->get_frame_features(frame),
+			_cost_function->get_dimension_weights(), dimension, MM_INFINITY);
+}
 
-	int get_current_frame() const { return _current_frame; }
+void MotionMatchingController::_run_search() {
+	if (!_search->is_built() || _cost_function.is_null()) {
+		WARN_PRINT_ONCE(
+				"MotionMatchingController::_run_search() called before the search tree was built "
+				"or with no cost function. Call rebuild() after assigning a resource/database.");
+		return;
+	}
 
-	// Foot contact of the currently playing frame, read from the same data
-	// the feature extractor wrote during database build. Split out of
-	// get_debug_info() so a per-frame consumer (the 3D debug draw) doesn't
-	// have to build the whole info Dictionary just for these two bits.
-	bool get_current_left_foot_contact() const;
-	bool get_current_right_foot_contact() const;
-	int get_current_animation_id() const { return _current_animation; }
-	Ref<MMRootMotion> get_root_motion() const { return _root_motion; }
-	Transform3D consume_root_motion();
+	uint64_t started = Time::get_singleton()->get_ticks_usec();
+	_build_query();
+	_last_query_build_usec = (double)(Time::get_singleton()->get_ticks_usec() - started);
 
-	Dictionary get_debug_info() const;
-	PackedVector3Array get_debug_trajectory() const;
+	started = Time::get_singleton()->get_ticks_usec();
+	_continuation_cost = _evaluate_continuation();
+	_last_continuation_usec = (double)(Time::get_singleton()->get_ticks_usec() - started);
 
-	// Debug-only: the p_count best-matching frames by exact cost, using the
-	// same filter the most recent search used. O(database frame count) per
-	// call -- fine for a debug panel polling a few times a second, not for
-	// every gameplay frame. See
-	// MMPoseSearch::search_top_candidates_debug_raw() for why the cost here
-	// is exact rather than the fast path's pruned value.
-	Array get_debug_candidates(int p_count = 3) const;
+	const MMSearchFilter filter = _build_filter();
+	MMSearchContext context = _build_context();
 
-	// Debug-only: each feature group's share of the winning frame's total
-	// cost, as a percentage -- e.g. {"pose_position": 40.0, "trajectory_position":
-	// 35.0, ...}. Empty if nothing has matched yet.
-	Dictionary get_debug_cost_breakdown() const;
+	// Handing the continuation cost to the search as an upper bound means the
+	// tree can immediately discard every branch that cannot beat what the
+	// character is already doing.
+	if (_continuation_cost < MM_INFINITY) {
+		context.best_cost_seed = _continuation_cost;
+	}
 
-	// Debug-only: next foot-contact change within the CURRENTLY PLAYING
-	// clip (not future trajectory points, whose clip hasn't been chosen
-	// yet). {"next_left_change_seconds": ..., "next_right_change_seconds":
-	// ...}; a key is absent if no change is found within the look-ahead
-	// horizon or the clip ends first.
-	Dictionary get_debug_footstep_timing() const;
+	// Cache lookup. The key mixes the quantized query with the filter, so a
+	// change in gameplay state (a jump request, a category lock, a traversal
+	// bias, ...) always misses even if the query itself repeats — reusing an
+	// answer computed under a different filter would silently let through a
+	// frame that should have been excluded, which is exactly the search
+	// quality regression the cache must not cause.
+	_pending_cache_key = _make_cache_key(filter);
+	int cached_frame = -1;
+	float cached_cost = MM_INFINITY;
+	if (_cache.lookup(_pending_cache_key, cached_frame, cached_cost) && cached_frame >= 0 &&
+			cached_frame < _database->get_frame_count()) {
+		MMMatchResult result;
+		result.frame_index = cached_frame;
+		result.animation_id = _database->get_frame_animation_id(cached_frame);
+		result.animation_time = _database->get_frame_time_value(cached_frame);
+		result.normalized_time = _database->get_frame_normalized_value(cached_frame);
+		result.cost = cached_cost;
+		_stats.reset();
+		_stats.cache_hits = _cache.get_hits();
+		_stats.cache_misses = _cache.get_misses();
+		// A cache hit did no tree work, so it is deliberately not fed to
+		// MMProfiler: recording it as a near-zero-cost search sample would
+		// dilute the percentiles the profiler exists to surface.
+		_consume_result(result);
+		return;
+	}
 
-	// Debug-only: total vs. filter-surviving frame count for the filter the
-	// most recent search used -- see MMPoseSearch::count_filtered_frames_debug_raw().
-	Dictionary get_debug_filter_stats() const;
+	// Mobile/low-end LOD: MotionMatchingResource::quality picks how many of
+	// the schema's leading feature dimensions are actually compared, per
+	// MMFeatureSchema::get_lod_dimension()'s documented prefix ordering.
+	// This was previously a dead property -- set_quality()/get_quality()
+	// existed and get_lod_dimension() computed the right number, but
+	// nothing ever read either at search time, so every device always ran
+	// the full ULTRA-dimension search regardless of this setting.
+	const int lod_dimension = (_resource.is_valid() && _schema.is_valid())
+			? _schema->get_lod_dimension(_resource->get_quality())
+			: -1;
 
-	// Debug-only: per-animation search-cost and usage stats, accumulated
-	// since the last reset_debug_analytics() call (or controller start).
-	// {animation_id (int): {"clip_name", "search_count", "average_cost",
-	// "play_count"}, ...}. This is the same underlying data a "pose
-	// matching heatmap" would visualize (average_cost per animation) and
-	// what a "most/least used" readout would rank (play_count) -- one
-	// accumulator, two ways to read it.
-	Dictionary get_debug_analytics() const;
+	if (_async_search && _worker.is_running()) {
+		_pending_request = _worker.submit(_query.ptr(), _query.size(), filter, context, lod_dimension);
+		return;
+	}
 
-	// Debug-only: rolling log of actual clip switches, most recent last.
-	// [{"time", "from_clip", "to_clip", "cost"}, ...]. Only real switches
-	// (_apply_match() actually changing clip), not every search.
-	Array get_debug_transitions() const;
+	const MMMatchResult result = _search->search(_query.ptr(), _cost_function, filter, context, _stats, lod_dimension);
+	_stats.cache_hits = _cache.get_hits();
+	_stats.cache_misses = _cache.get_misses();
+	_profiler->record(_stats.search_time_usec, _stats.frames_compared, _stats.candidates_visited,
+			_stats.nodes_visited, _stats.budget_exceeded);
+	_consume_result(result);
+}
 
-	// Clears get_debug_analytics()/get_debug_transitions()'s accumulated
-	// history. Does not affect playback.
-	void reset_debug_analytics();
+// Combines the quantized query hash with the parts of the filter that change
+// which frames are eligible. Boost::hash_combine-style mixing: cheap, and
+// enough to guarantee a different filter produces a different key even when
+// individual fields happen to XOR to the same value.
+uint64_t MotionMatchingController::_make_cache_key(const MMSearchFilter &p_filter) const {
+	// Normalized feature space is roughly unit variance per group, so a
+	// quantization step of 0.15 (about a seventh of one standard deviation)
+	// groups queries that are close enough to share an answer without
+	// blurring together motions that should be treated differently. This is
+	// an internal constant rather than an exposed property to keep this
+	// integration minimal; see BUILD_READINESS_REPORT.md for the tradeoff.
+	constexpr float MM_CACHE_QUANTIZATION = 0.15f;
 
-	// ---- Optional subsystems, opt-in by assignment ----
+	uint64_t key = MMSearchCache::make_key(_query.ptr(), _query.size(), MM_CACHE_QUANTIZATION);
+	auto mix = [](uint64_t h, uint32_t v) -> uint64_t {
+		return h ^ ((uint64_t)v + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2));
+	};
+	key = mix(key, p_filter.required_tags);
+	key = mix(key, p_filter.any_tags);
+	key = mix(key, p_filter.blocked_tags);
+	key = mix(key, p_filter.category_mask);
+	return key;
+}
 
-	// Search-phase profiler. Always present (see the member comment), but
-	// only meaningful once search has actually run a few times.
-	Ref<MMProfiler> get_profiler() const { return _profiler; }
+void MotionMatchingController::_consume_result(const MMMatchResult &p_result) {
+	_last_result = p_result;
+	if (!p_result.is_valid()) {
+		// Nothing passed the filter. Keep playing rather than freezing; the
+		// fallback is always the pose we already have.
+		return;
+	}
+	// Debug-only, and deliberately here rather than in _apply_match() below:
+	// this records how this animation's best frame scored on THIS search,
+	// whether or not it actually wins the switch decision -- that is what
+	// makes the accumulated average a "how competitive is this animation"
+	// signal instead of just "how often did it win."
+	_record_search_cost(p_result.animation_id, p_result.cost);
+	_cache.store(_pending_cache_key, p_result.frame_index, p_result.cost);
+	if (_should_switch(p_result)) {
+		_apply_match(p_result);
+	}
+}
 
-	// Assigning a traversal instance opts the controller into probing the
-	// predicted trajectory for obstacles once per grounded update tick, and
-	// biasing the next search's category/tags toward whatever it finds.
-	// Leaving this null (the default) costs nothing — no probe runs.
-	void set_traversal(const Ref<MMTraversal> &p_traversal);
-	Ref<MMTraversal> get_traversal() const { return _traversal; }
+bool MotionMatchingController::_should_switch(const MMMatchResult &p_candidate) const {
+	if (_current_frame < 0) {
+		return true;
+	}
 
-	// Assigning a motion warp instance opts the controller into applying it
-	// through consume_root_motion() while active. begin_warp() opens a single
-	// window spanning from the current playback time to the end of the
-	// currently playing clip — a caller wanting a different window should add
-	// it directly via get_motion_warp() before or instead of calling
-	// begin_warp(). end_warp() is not called automatically; the caller decides
-	// when the warp is done.
-	void set_motion_warp(const Ref<MMMotionWarp> &p_warp);
-	Ref<MMMotionWarp> get_motion_warp() const { return _motion_warp; }
-	void begin_warp(const Transform3D &p_target);
-	void end_warp();
-	bool is_warping() const { return _motion_warp.is_valid() && _motion_warp->is_active(); }
+	const int continuation = _current_database_frame();
+	if (p_candidate.frame_index == continuation) {
+		return false;
+	}
 
-	// Rebuilds the acceleration structure. Call after swapping the database.
-	void rebuild();
-};
+	const float minimum_clip_time = _resource.is_valid() ? _resource->get_minimum_clip_time() : 0.12f;
+	const float threshold = _resource.is_valid() ? _resource->get_improvement_threshold() : 0.12f;
+	const bool allow_same_clip = _resource.is_valid() ? _resource->get_allow_same_clip_jump() : false;
 
-} // namespace godot
+	// A jump request or a state change is a gameplay decision, not a cost
+	// decision, so it bypasses the dampers.
+	if (_jump_requested || _landing_timer > 0.0f) {
+		return true;
+	}
 
-#endif // MOTION_MATCHING_HPP
+	if (_time_in_clip < minimum_clip_time) {
+		return false;
+	}
+	if (_switch_cooldown_timer > 0.0f) {
+		return false;
+	}
+	if (!allow_same_clip && p_candidate.animation_id == _current_animation) {
+		return false;
+	}
+	if (_continuation_cost >= MM_INFINITY) {
+		return true;
+	}
+
+	// Hysteresis. The candidate has to be meaningfully better, not marginally
+	// better, or the character flickers between near identical clips.
+	return p_candidate.cost < _continuation_cost * (1.0f - threshold);
+}
+
+void MotionMatchingController::_apply_match(const MMMatchResult &p_match) {
+	const uint64_t started = Time::get_singleton()->get_ticks_usec();
+
+	Ref<MMAnimationEntry> entry = _database->get_animation_entry(p_match.animation_id);
+	if (entry.is_null()) {
+		WARN_PRINT_ONCE(
+				"MotionMatchingController::_apply_match() received a match with an animation_id "
+				"that has no corresponding MMAnimationEntry in the database. This indicates the "
+				"database and the search tree built from it are out of sync — call rebuild().");
+		return;
+	}
+
+	const float blend_time = _resource.is_valid() ? _resource->get_blend_time() : 0.15f;
+	const float minimum_blend = _resource.is_valid() ? _resource->get_minimum_blend_time() : 0.06f;
+	const float cooldown = _resource.is_valid() ? _resource->get_switch_cooldown() : 0.05f;
+
+	if (_current_animation >= 0) {
+		_previous_clip = _current_clip;
+		_previous_time = _current_time;
+		_previous_frame = _current_frame;
+		_previous_animation = _current_animation;
+		_blend_weight = 0.0f;
+		_blend_speed = 1.0f / MAX(blend_time, minimum_blend);
+	} else {
+		_blend_weight = 1.0f;
+		_blend_speed = 0.0f;
+	}
+
+	_current_animation = p_match.animation_id;
+	_current_clip = entry->get_qualified_name();
+
+	// Debug-only: logged here (not in _consume_result()) because this is
+	// the point where a switch actually happened, not just a candidate that
+	// was considered.
+	_record_transition(_previous_animation >= 0 ? String(_previous_clip) : String(), _current_clip, p_match.cost);
+
+	// The whole point of motion matching: enter the clip where the motion
+	// actually continues, never at zero.
+	_current_time = p_match.animation_time;
+	_current_frame = p_match.frame_index;
+	_seek_request = true;
+	_time_in_clip = 0.0f;
+	_switch_cooldown_timer = cooldown;
+
+	_root_motion->notify_frame_jump(p_match.frame_index);
+
+	if (_jump_requested) {
+		_jump_requested = false;
+		lock_category(MM_CATEGORY_AIRBORNE, 0.0f); // Released on touchdown.
+	}
+
+	_profiler->record_switch();
+	_last_switch_usec = (double)(Time::get_singleton()->get_ticks_usec() - started);
+
+	if (_resource.is_valid() && _resource->get_debug_enabled()) {
+		Ref<MMAnimationEntry> previous_entry = _previous_animation >= 0
+				? _database->get_animation_entry(_previous_animation)
+				: Ref<MMAnimationEntry>();
+		// "Transition" isn't a category or tag this addon tracks separately --
+		// a transition clip is just an ordinary database entry, matched by
+		// cost like any other. This line reports what was actually picked
+		// (name, category, tags) so a transition clip either shows up here by
+		// name or it doesn't; there is no separate flag to trust instead.
+		print_line(vformat(
+				"[MotionMatching] Current: %s (category %d, tags %d, loop %s) | Previous: %s | "
+				"Velocity: %s (%.2f m/s) | Desired velocity: %s | State: %s",
+				entry->get_qualified_name(), entry->get_category(), entry->get_tags(),
+				entry->get_loop() ? "true" : "false",
+				previous_entry.is_valid() ? previous_entry->get_qualified_name() : StringName("(none)"),
+				_velocity, Vector2(_velocity.x, _velocity.z).length(), _desired_velocity,
+				!_grounded ? "airborne" : (_landing_timer > 0.0f ? "landing" : "grounded")));
+	}
+
+	emit_signal("animation_changed", _current_clip, _current_time, p_match.cost);
+}
+
+void MotionMatchingController::_advance_playback(double p_delta) {
+	if (_current_animation < 0) {
+		return;
+	}
+
+	_current_time += p_delta;
+	_previous_time += p_delta;
+
+	if (_blend_weight < 1.0f) {
+		_blend_weight = MIN(1.0f, _blend_weight + _blend_speed * (float)p_delta);
+		if (_previous_animation >= 0) {
+			_previous_frame = _database->get_frame_at_time(_previous_animation, (float)_previous_time);
+		}
+		if (_blend_weight >= 1.0f) {
+			_previous_clip = StringName();
+			_previous_frame = -1;
+			_previous_animation = -1;
+		}
+	}
+
+	Ref<MMAnimationEntry> entry = _database->get_animation_entry(_current_animation);
+	if (entry.is_null()) {
+		return;
+	}
+
+	const double length = entry->get_length();
+	if (length > 0.0 && _current_time >= length) {
+		if (entry->get_loop()) {
+			_current_time = Math::fposmod(_current_time, length);
+		} else {
+			_current_time = length;
+			// A one shot clip that ran out must not hold the last pose.
+			_force_search = true;
+		}
+	}
+
+	_current_frame = _database->get_frame_at_time(_current_animation, (float)_current_time);
+}
+
+bool MotionMatchingController::take_seek_request() {
+	const bool requested = _seek_request;
+	_seek_request = false;
+	return requested;
+}
+
+Transform3D MotionMatchingController::consume_root_motion() {
+	Transform3D delta = _root_motion->consume_delta();
+	if (_motion_warp.is_valid() && _motion_warp->is_active() && _character != nullptr) {
+		delta = _motion_warp->warp_delta(delta, _character->get_global_transform(),
+				(float)_current_time, _last_delta_time);
+	}
+	// Cached purely for get_debug_info()'s root-motion-vs-actual-movement
+	// comparison; does not affect what's returned to the caller.
+	_last_root_motion_delta = delta.origin;
+	return delta;
+}
+
+bool MotionMatchingController::get_current_left_foot_contact() const {
+	if (_database.is_null() || _current_frame < 0 || _current_frame >= _database->get_frame_count()) {
+		return false;
+	}
+	return (_database->get_frame_contacts_value(_current_frame) & 1) != 0;
+}
+
+bool MotionMatchingController::get_current_right_foot_contact() const {
+	if (_database.is_null() || _current_frame < 0 || _current_frame >= _database->get_frame_count()) {
+		return false;
+	}
+	return (_database->get_frame_contacts_value(_current_frame) & 2) != 0;
+}
+
+Dictionary MotionMatchingController::get_debug_info() const {
+	Dictionary info;
+	info["clip"] = _current_clip;
+	info["time"] = _current_time;
+	info["frame"] = _current_frame;
+	info["animation_id"] = _current_animation;
+	info["previous_clip"] = _previous_clip;
+	info["blend_weight"] = _blend_weight;
+	info["match_cost"] = _last_result.cost;
+	info["continuation_cost"] = _continuation_cost;
+	info["frames_compared"] = _stats.frames_compared;
+	info["candidates_visited"] = _stats.candidates_visited;
+	info["nodes_visited"] = _stats.nodes_visited;
+	info["search_time_usec"] = _stats.search_time_usec;
+	info["budget_exceeded"] = _stats.budget_exceeded;
+	info["cache_hits"] = _cache.get_hits();
+	info["cache_misses"] = _cache.get_misses();
+	info["grounded"] = _grounded;
+	info["time_in_clip"] = _time_in_clip;
+	info["database_frames"] = _database.is_valid() ? _database->get_frame_count() : 0;
+
+	// Per-frame foot contact, read from the same data the feature extractor
+	// wrote during database build (bit 0 = left, bit 1 = right). This is what
+	// MMFootIKModifier's contact-locking actually needs; without it the flags
+	// silently default to false regardless of the currently playing frame.
+	info["left_foot_contact"] = get_current_left_foot_contact();
+	info["right_foot_contact"] = get_current_right_foot_contact();
+
+	// Search-phase profiler report (frames_compared/candidates/nodes are
+	// covered above per-tick already; this is the ring-buffer summary —
+	// percentiles, worst case, switch count, budget overruns).
+	info["profiler"] = _profiler->get_report();
+
+	// Phase timings that don't belong in MMProfiler's search-shaped Sample.
+	info["query_build_usec"] = _last_query_build_usec;
+	info["continuation_eval_usec"] = _last_continuation_usec;
+	info["switch_apply_usec"] = _last_switch_usec;
+	info["update_total_usec"] = _last_update_usec;
+
+	// Optional-subsystem state, present even when unassigned so a debug panel
+	// can distinguish "not enabled" from "enabled but idle".
+	info["traversal_active"] = _traversal.is_valid();
+	info["traversal_type"] = _traversal.is_valid() ? (int)_traversal->get_detected_type() : 0;
+	info["warp_active"] = is_warping();
+
+	// Movement intent + acceleration debug: raw current/desired state from
+	// the trajectory predictor, decomposed into the character's own
+	// forward/right axes so "running forward" reads as forward regardless
+	// of world-space heading.
+	if (_trajectory.is_valid()) {
+		const Vector3 current_velocity = _trajectory->get_current_velocity();
+		const Vector3 desired_velocity = _trajectory->get_desired_velocity();
+		const Vector3 acceleration = _trajectory->get_current_acceleration();
+		const float current_speed = current_velocity.length();
+		const float desired_speed = desired_velocity.length();
+		const float max_speed = MAX(_trajectory->get_max_speed(), 0.0001f);
+
+		info["speed_current"] = current_speed;
+		info["speed_desired"] = desired_speed;
+		info["speed_max"] = _trajectory->get_max_speed();
+		info["acceleration"] = acceleration.length();
+
+		Vector3 forward = _trajectory->get_current_facing();
+		forward.y = 0.0f;
+		if (forward.length_squared() > 0.000001f) {
+			forward.normalize();
+		} else {
+			forward = Vector3(0, 0, -1);
+		}
+		const Vector3 right = forward.cross(Vector3(0, 1, 0)).normalized();
+
+		if (desired_speed > 0.0001f) {
+			const Vector3 desired_direction = desired_velocity / desired_speed;
+			const float scale = MIN(desired_speed / max_speed, 1.0f) * 100.0f;
+			info["intent_forward_percent"] = desired_direction.dot(forward) * scale;
+			info["intent_right_percent"] = desired_direction.dot(right) * scale;
+		} else {
+			info["intent_forward_percent"] = 0.0f;
+			info["intent_right_percent"] = 0.0f;
+		}
+		info["intent_stop_percent"] = CLAMP(100.0f - (desired_speed / max_speed) * 100.0f, 0.0f, 100.0f);
+
+		// Turn-in-place: only meaningful while nearly stationary -- once the
+		// character is moving, a facing difference is an ordinary turn, not
+		// something that needs a dedicated idle-turn animation.
+		const Vector3 desired_facing = _trajectory->get_desired_facing();
+		const float facing_dot = CLAMP(forward.dot(desired_facing.normalized()), -1.0f, 1.0f);
+		float turn_degrees = Math::rad_to_deg(Math::acos(facing_dot));
+		if (forward.cross(desired_facing).y < 0.0f) {
+			turn_degrees = -turn_degrees;
+		}
+		info["turn_intent_degrees"] = turn_degrees;
+		// Classifies the continuous angle above into the 45/90/135/180
+		// buckets a traditional turn-in-place clip set is usually authored
+		// around -- see mm_turn_bucket_for_degrees()'s comment for why this
+		// isn't a stored tag. Gameplay code can use this to bias which
+		// pre-tagged clip group it looks for; the continuous yaw-rate
+		// feature (schema-level, see MMFeatureSchema::get_yaw_rate_offset())
+		// is what actually drives the search itself.
+		info["turn_bucket"] = (int)mm_turn_bucket_for_degrees(turn_degrees);
+		const float turn_magnitude = turn_degrees < 0.0f ? -turn_degrees : turn_degrees;
+		info["turn_in_place_needed"] = current_speed < 0.15f && turn_magnitude > 30.0f;
+	}
+
+	// Root motion vs. actual character movement -- see the field comments on
+	// _last_root_motion_delta/_last_actual_movement_delta (near their
+	// declaration) for the one-tick offset this comparison carries.
+	info["root_motion_delta_length"] = _last_root_motion_delta.length();
+	info["actual_movement_delta_length"] = _last_actual_movement_delta.length();
+
+	return info;
+}
+
+PackedVector3Array MotionMatchingController::get_debug_trajectory() const {
+	return _trajectory->get_debug_points();
+}
+
+Array MotionMatchingController::get_debug_candidates(int p_count) const {
+	if (_search.is_null() || !_search->is_built() || _cost_function.is_null() || _query.is_empty()) {
+		return Array();
+	}
+	return _search->search_top_candidates_debug_raw(_query.ptr(), _cost_function, _build_filter(), p_count);
+}
+
+Dictionary MotionMatchingController::get_debug_cost_breakdown() const {
+	Dictionary breakdown;
+	if (_database.is_null() || _cost_function.is_null() || _query.is_empty() ||
+			_last_result.frame_index < 0 || _last_result.frame_index >= _database->get_frame_count()) {
+		return breakdown;
+	}
+
+	const int dimension = _query.size();
+	const float *frame_features = _database->get_frame_features(_last_result.frame_index);
+
+	// compute_group_errors() takes PackedFloat32Array (it is the scriptable,
+	// debug-facing side of the cost function); the hot path's raw float*
+	// query and frame data get copied into one only here, off the hot path.
+	PackedFloat32Array query_vector;
+	query_vector.resize(dimension);
+	PackedFloat32Array frame_vector;
+	frame_vector.resize(dimension);
+	for (int i = 0; i < dimension; i++) {
+		query_vector.set(i, _query[i]);
+		frame_vector.set(i, frame_features[i]);
+	}
+
+	const PackedFloat32Array errors = _cost_function->compute_group_errors(query_vector, frame_vector);
+
+	static const char *group_names[MM_GROUP_MAX] = {
+		"trajectory_position",
+		"trajectory_direction",
+		"pose_position",
+		"pose_velocity",
+		"root_velocity",
+		"extra",
+		"yaw_rate",
+	};
+
+	float total = 0.0f;
+	for (int i = 0; i < errors.size(); i++) {
+		total += errors[i];
+	}
+
+	for (int i = 0; i < errors.size() && i < MM_GROUP_MAX; i++) {
+		breakdown[group_names[i]] = total > 0.0001f ? (errors[i] / total) * 100.0f : 0.0f;
+	}
+	return breakdown;
+}
+
+Dictionary MotionMatchingController::get_debug_footstep_timing() const {
+	Dictionary result;
+	if (_database.is_null() || _current_animation < 0 || _current_frame < 0 ||
+			_current_frame >= _database->get_frame_count()) {
+		return result;
+	}
+
+	const uint8_t current_contacts = _database->get_frame_contacts_value(_current_frame);
+	const int frame_count = _database->get_frame_count();
+	// Generous but bounded look-ahead. Frames of one animation are stored
+	// contiguously in build order, so hitting a different animation_id (or
+	// the end of the database) means this clip's own frames ran out within
+	// the horizon.
+	const int horizon = 90;
+	int next_left_frame = -1;
+	int next_right_frame = -1;
+	for (int offset = 1; offset <= horizon; offset++) {
+		const int frame = _current_frame + offset;
+		if (frame >= frame_count || _database->get_frame_animation_id(frame) != _current_animation) {
+			break;
+		}
+		const uint8_t contacts = _database->get_frame_contacts_value(frame);
+		if (next_left_frame < 0 && (contacts & 1) != (current_contacts & 1)) {
+			next_left_frame = frame;
+		}
+		if (next_right_frame < 0 && (contacts & 2) != (current_contacts & 2)) {
+			next_right_frame = frame;
+		}
+		if (next_left_frame >= 0 && next_right_frame >= 0) {
+			break;
+		}
+	}
+
+	const float now_time = _database->get_frame_time_value(_current_frame);
+	if (next_left_frame >= 0) {
+		result["next_left_change_seconds"] = _database->get_frame_time_value(next_left_frame) - now_time;
+	}
+	if (next_right_frame >= 0) {
+		result["next_right_change_seconds"] = _database->get_frame_time_value(next_right_frame) - now_time;
+	}
+	return result;
+}
+
+Dictionary MotionMatchingController::get_debug_filter_stats() const {
+	if (_search.is_null() || !_search->is_built()) {
+		return Dictionary();
+	}
+	return _search->count_filtered_frames_debug_raw(_build_filter());
+}
+
+void MotionMatchingController::_record_search_cost(int p_animation_id, float p_cost) {
+	if (p_animation_id < 0 || !Math::is_finite((double)p_cost)) {
+		return;
+	}
+
+	Dictionary entry = _animation_stats.get(p_animation_id, Dictionary());
+	if (entry.is_empty()) {
+		Ref<MMAnimationEntry> anim = _database.is_valid() ? _database->get_animation_entry(p_animation_id) : Ref<MMAnimationEntry>();
+		entry["clip_name"] = anim.is_valid() ? String(anim->get_qualified_name()) : vformat("id %d", p_animation_id);
+		entry["search_count"] = 0;
+		entry["total_cost"] = 0.0f;
+		entry["play_count"] = 0;
+	}
+	entry["search_count"] = (int)entry["search_count"] + 1;
+	entry["total_cost"] = (float)entry["total_cost"] + p_cost;
+	_animation_stats[p_animation_id] = entry;
+}
+
+void MotionMatchingController::_record_transition(const String &p_from_clip, const String &p_to_clip, float p_cost) {
+	Dictionary log_entry;
+	log_entry["time"] = (double)Time::get_singleton()->get_ticks_msec() / 1000.0;
+	log_entry["from_clip"] = p_from_clip;
+	log_entry["to_clip"] = p_to_clip;
+	log_entry["cost"] = p_cost;
+	_transition_log.push_back(log_entry);
+
+	static const int MM_TRANSITION_LOG_CAPACITY = 24;
+	while (_transition_log.size() > MM_TRANSITION_LOG_CAPACITY) {
+		_transition_log.remove_at(0);
+	}
+
+	if (_current_animation < 0) {
+		return;
+	}
+	Dictionary entry = _animation_stats.get(_current_animation, Dictionary());
+	if (entry.is_empty()) {
+		entry["clip_name"] = p_to_clip;
+		entry["search_count"] = 0;
+		entry["total_cost"] = 0.0f;
+		entry["play_count"] = 0;
+	}
+	entry["play_count"] = (int)entry["play_count"] + 1;
+	_animation_stats[_current_animation] = entry;
+}
+
+Dictionary MotionMatchingController::get_debug_analytics() const {
+	Dictionary result;
+	Array keys = _animation_stats.keys();
+	for (int i = 0; i < keys.size(); i++) {
+		const Variant key = keys[i];
+		const Dictionary source = _animation_stats[key];
+		Dictionary entry;
+		entry["clip_name"] = source.get("clip_name", "");
+		entry["search_count"] = source.get("search_count", 0);
+		entry["play_count"] = source.get("play_count", 0);
+		const int search_count = (int)source.get("search_count", 0);
+		const float total_cost = (float)source.get("total_cost", 0.0f);
+		entry["average_cost"] = search_count > 0 ? total_cost / (float)search_count : 0.0f;
+		result[key] = entry;
+	}
+	return result;
+}
+
+Array MotionMatchingController::get_debug_transitions() const {
+	return _transition_log.duplicate();
+}
+
+void MotionMatchingController::reset_debug_analytics() {
+	_animation_stats.clear();
+	_transition_log.clear();
+}
+
+void MotionMatchingController::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("set_resource", "resource"), &MotionMatchingController::set_resource);
+	ClassDB::bind_method(D_METHOD("get_resource"), &MotionMatchingController::get_resource);
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "resource", PROPERTY_HINT_RESOURCE_TYPE,
+						  "MotionMatchingResource"),
+			"set_resource", "get_resource");
+
+	ClassDB::bind_method(D_METHOD("set_character_path", "path"), &MotionMatchingController::set_character_path);
+	ClassDB::bind_method(D_METHOD("get_character_path"), &MotionMatchingController::get_character_path);
+	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "character_path", PROPERTY_HINT_NODE_PATH_VALID_TYPES,
+						  "Node3D"),
+			"set_character_path", "get_character_path");
+
+	ClassDB::bind_method(D_METHOD("set_animation_tree_path", "path"),
+			&MotionMatchingController::set_animation_tree_path);
+	ClassDB::bind_method(D_METHOD("get_animation_tree_path"),
+			&MotionMatchingController::get_animation_tree_path);
+	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "animation_tree_path",
+						  PROPERTY_HINT_NODE_PATH_VALID_TYPES, "AnimationTree"),
+			"set_animation_tree_path", "get_animation_tree_path");
+
+	MM_BIND_PROPERTY(MotionMatchingController, Variant::BOOL, async_search)
+	MM_BIND_PROPERTY(MotionMatchingController, Variant::BOOL, auto_update)
+
+	ClassDB::bind_method(D_METHOD("set_velocity", "velocity"), &MotionMatchingController::set_velocity);
+	ClassDB::bind_method(D_METHOD("get_velocity"), &MotionMatchingController::get_velocity);
+	ClassDB::bind_method(D_METHOD("set_desired_velocity", "velocity"),
+			&MotionMatchingController::set_desired_velocity);
+	ClassDB::bind_method(D_METHOD("set_direction", "direction"), &MotionMatchingController::set_direction);
+	ClassDB::bind_method(D_METHOD("set_facing", "facing"), &MotionMatchingController::set_facing);
+	ClassDB::bind_method(D_METHOD("set_ground_state", "grounded"), &MotionMatchingController::set_ground_state);
+	ClassDB::bind_method(D_METHOD("get_ground_state"), &MotionMatchingController::get_ground_state);
+	ClassDB::bind_method(D_METHOD("set_fall_distance", "distance"), &MotionMatchingController::set_fall_distance);
+	ClassDB::bind_method(D_METHOD("request_jump"), &MotionMatchingController::request_jump);
+	ClassDB::bind_method(D_METHOD("set_trajectory", "positions", "directions"),
+			&MotionMatchingController::set_trajectory);
+	ClassDB::bind_method(D_METHOD("get_trajectory"), &MotionMatchingController::get_trajectory);
+
+	ClassDB::bind_method(D_METHOD("set_required_tags", "tags"), &MotionMatchingController::set_required_tags);
+	ClassDB::bind_method(D_METHOD("get_required_tags"), &MotionMatchingController::get_required_tags);
+	ClassDB::bind_method(D_METHOD("set_blocked_tags", "tags"), &MotionMatchingController::set_blocked_tags);
+	ClassDB::bind_method(D_METHOD("get_blocked_tags"), &MotionMatchingController::get_blocked_tags);
+	ClassDB::bind_method(D_METHOD("set_category_mask", "mask"), &MotionMatchingController::set_category_mask);
+	ClassDB::bind_method(D_METHOD("get_category_mask"), &MotionMatchingController::get_category_mask);
+	ClassDB::bind_method(D_METHOD("lock_category", "category", "duration"),
+			&MotionMatchingController::lock_category);
+	ClassDB::bind_method(D_METHOD("release_category"), &MotionMatchingController::release_category);
+
+	ClassDB::bind_method(D_METHOD("update", "delta"), &MotionMatchingController::update);
+	ClassDB::bind_method(D_METHOD("force_search"), &MotionMatchingController::force_search);
+	ClassDB::bind_method(D_METHOD("rebuild"), &MotionMatchingController::rebuild);
+
+	ClassDB::bind_method(D_METHOD("get_current_clip"), &MotionMatchingController::get_current_clip);
+	ClassDB::bind_method(D_METHOD("get_current_time"), &MotionMatchingController::get_current_time);
+	ClassDB::bind_method(D_METHOD("get_previous_clip"), &MotionMatchingController::get_previous_clip);
+	ClassDB::bind_method(D_METHOD("get_previous_time"), &MotionMatchingController::get_previous_time);
+	ClassDB::bind_method(D_METHOD("get_blend_weight"), &MotionMatchingController::get_blend_weight);
+	ClassDB::bind_method(D_METHOD("get_current_frame"), &MotionMatchingController::get_current_frame);
+	ClassDB::bind_method(D_METHOD("get_current_animation_id"),
+			&MotionMatchingController::get_current_animation_id);
+	ClassDB::bind_method(D_METHOD("get_root_motion"), &MotionMatchingController::get_root_motion);
+	ClassDB::bind_method(D_METHOD("consume_root_motion"), &MotionMatchingController::consume_root_motion);
+	ClassDB::bind_method(D_METHOD("get_debug_info"), &MotionMatchingController::get_debug_info);
+	ClassDB::bind_method(D_METHOD("get_current_left_foot_contact"),
+			&MotionMatchingController::get_current_left_foot_contact);
+	ClassDB::bind_method(D_METHOD("get_current_right_foot_contact"),
+			&MotionMatchingController::get_current_right_foot_contact);
+	ClassDB::bind_method(D_METHOD("get_debug_trajectory"), &MotionMatchingController::get_debug_trajectory);
+	ClassDB::bind_method(D_METHOD("get_debug_candidates", "count"),
+			&MotionMatchingController::get_debug_candidates, DEFVAL(3));
+	ClassDB::bind_method(D_METHOD("get_debug_cost_breakdown"),
+			&MotionMatchingController::get_debug_cost_breakdown);
+	ClassDB::bind_method(D_METHOD("get_debug_footstep_timing"),
+			&MotionMatchingController::get_debug_footstep_timing);
+	ClassDB::bind_method(D_METHOD("get_debug_filter_stats"),
+			&MotionMatchingController::get_debug_filter_stats);
+	ClassDB::bind_method(D_METHOD("get_debug_analytics"),
+			&MotionMatchingController::get_debug_analytics);
+	ClassDB::bind_method(D_METHOD("get_debug_transitions"),
+			&MotionMatchingController::get_debug_transitions);
+	ClassDB::bind_method(D_METHOD("reset_debug_analytics"),
+			&MotionMatchingController::reset_debug_analytics);
+
+	ClassDB::bind_method(D_METHOD("get_profiler"), &MotionMatchingController::get_profiler);
+
+	ClassDB::bind_method(D_METHOD("set_traversal", "traversal"), &MotionMatchingController::set_traversal);
+	ClassDB::bind_method(D_METHOD("get_traversal"), &MotionMatchingController::get_traversal);
+
+	ClassDB::bind_method(D_METHOD("set_motion_warp", "warp"), &MotionMatchingController::set_motion_warp);
+	ClassDB::bind_method(D_METHOD("get_motion_warp"), &MotionMatchingController::get_motion_warp);
+	ClassDB::bind_method(D_METHOD("begin_warp", "target"), &MotionMatchingController::begin_warp);
+	ClassDB::bind_method(D_METHOD("end_warp"), &MotionMatchingController::end_warp);
+	ClassDB::bind_method(D_METHOD("is_warping"), &MotionMatchingController::is_warping);
+
+	ADD_SIGNAL(MethodInfo("animation_changed", PropertyInfo(Variant::STRING_NAME, "clip"),
+			PropertyInfo(Variant::FLOAT, "time"), PropertyInfo(Variant::FLOAT, "cost")));
+	ADD_SIGNAL(MethodInfo("search_completed", PropertyInfo(Variant::DICTIONARY, "debug_info")));
+	ADD_SIGNAL(MethodInfo("traversal_requested", PropertyInfo(Variant::INT, "traversal_type"),
+			PropertyInfo(Variant::VECTOR3, "target")));
+}
