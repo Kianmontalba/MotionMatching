@@ -272,12 +272,12 @@ private:
 
 	// rebuild() used to call _search->build() directly on whatever thread
 	// called it -- for a database with many frames and a wide feature
-	// vector (more tracked bones, root velocity, yaw rate, extra
-	// dimensions all add up), that is expensive enough to block _ready()
-	// for a long time on weak hardware. That block is what was actually
-	// behind reports of the game "hanging at the splash screen" instead of
-	// starting -- not a crash, just a very long synchronous wait with
-	// nothing rendered yet. Building on a thread instead means update()
+	// vector (more tracked bones, root velocity, extra dimensions all add
+	// up), that is expensive enough to block _ready() for a long time on
+	// weak hardware. That block is what was actually behind reports of the
+	// game "hanging at the splash screen" instead of starting -- not a
+	// crash, just a very long synchronous wait with nothing rendered yet.
+	// Building on a thread instead means update()
 	// has to explicitly skip searching until the build finishes; see its
 	// guard clause and _finish_rebuild_if_ready().
 	std::thread _build_thread;
@@ -474,6 +474,17 @@ public:
 
 	// Rebuilds the acceleration structure. Call after swapping the database.
 	void rebuild();
+
+	// Switches the active database by its script-facing grouping tag
+	// instead of a hardcoded box/database name -- e.g.
+	// `mm_controller.play_by_tag(1)` to activate whichever database(s) were
+	// tagged "1" in the dock ("Stand"/"Walk"/"Run"/"Sprint" could all share
+	// tag 1). If more than one database shares the tag, the one whose
+	// MotionMatchingDatabase::get_speed_range() best fits the controller's
+	// current speed (from set_velocity()/set_desired_velocity()) is picked.
+	// Returns false and leaves playback unchanged if no database has this
+	// tag, or if no resource/database is assigned yet.
+	bool play_by_tag(int p_tag);
 };
 
 } // namespace godot
