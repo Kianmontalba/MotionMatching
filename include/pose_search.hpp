@@ -80,10 +80,15 @@ public:
 	int get_leaf_size() const { return _leaf_size; }
 
 	// Full search. Returns an invalid result only when every frame was
-	// rejected by the filter.
+	// rejected by the filter. p_max_dimension caps how many leading feature
+	// dimensions are actually compared -- pass a value from
+	// MMFeatureSchema::get_lod_dimension() to run a cheaper, lower quality
+	// search on weak hardware; -1 (default) uses every dimension the tree
+	// was built with. See _descend()'s comment for why capping this is
+	// safe even though the tree itself is still the full-dimension one.
 	MMMatchResult search(const float *p_query, const Ref<MMCostFunction> &p_cost,
 			const MMSearchFilter &p_filter, const MMSearchContext &p_context,
-			MMSearchStats &r_stats) const;
+			MMSearchStats &r_stats, int p_max_dimension = -1) const;
 
 	// Brute force reference implementation, used by the tests and by the
 	// editor when validating that an acceleration structure is consistent.
