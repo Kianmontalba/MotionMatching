@@ -48,6 +48,11 @@ private:
 	Vector3 _position;
 	Vector3 _velocity;
 	Vector3 _acceleration;
+	// Signed radians/sec, +left/-right (Y-up, right-handed). Derived after
+	// each update() from the gap between _facing and the first predicted
+	// sample rather than tracked as its own spring state -- see update()'s
+	// comment at the assignment site for why.
+	float _yaw_rate = 0.0f;
 	Vector3 _facing = Vector3(0, 0, -1);
 	Vector3 _desired_velocity;
 	Vector3 _desired_facing = Vector3(0, 0, -1);
@@ -107,6 +112,7 @@ public:
 	Vector3 get_current_velocity() const { return _velocity; }
 	Vector3 get_current_facing() const { return _facing; }
 	Vector3 get_current_acceleration() const { return _acceleration; }
+	float get_current_yaw_rate() const { return _yaw_rate; }
 	Vector3 get_desired_velocity() const { return _desired_velocity; }
 	Vector3 get_desired_facing() const { return _desired_facing; }
 
