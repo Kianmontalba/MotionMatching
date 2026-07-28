@@ -110,6 +110,15 @@ private:
 	// table one row at a time.
 	CheckButton *_loop_toggle = nullptr;
 
+	// Script-facing grouping tag for the currently selected database (see
+	// MotionMatchingDatabase::tag). Integer-only by construction (SpinBox,
+	// not LineEdit -- there is no text to type, so no letters are possible),
+	// range 1-100, baked onto the database at Build time. Several
+	// differently-named databases can share one tag; play_by_tag() is what
+	// reads it back at runtime.
+	SpinBox *_database_tag = nullptr;
+	void _on_database_tag_changed(double p_value);
+
 	void _on_box_selected(int p_index);
 	void _on_add_box_pressed();
 	void _on_box_name_changed(const String &p_text);
@@ -121,6 +130,13 @@ private:
 	void _refresh_database_options();
 	void _persist_extra_database();
 	void _save_all_databases();
+
+	// Collapsed by default -- these four fields are set once per box/database
+	// and rarely revisited, so keeping them out of view is what keeps the
+	// dock compact instead of every field always taking up space.
+	Button *_advanced_toggle = nullptr;
+	VBoxContainer *_advanced_section = nullptr;
+	void _on_advanced_toggle_pressed();
 
 	SpinBox *_sample_rate = nullptr;
 	// Corrects a root/hip bone rest orientation that does not point the way
