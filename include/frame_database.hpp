@@ -101,6 +101,13 @@ private:
 	// way, distinguishable from a real version number, which starts at 1.
 	int _format_version = 0;
 
+	// How much reduce_frame_stride() has already thinned this in-memory copy
+	// relative to what was actually loaded from disk. 1 = untouched. Tracked
+	// so calling it again with the same or a smaller stride is a safe no-op
+	// instead of thinning twice; calling it with a larger stride thins
+	// further from the current (already-reduced) arrays.
+	int _applied_stride = 1;
+
 protected:
 	static void _bind_methods();
 
@@ -200,6 +207,17 @@ public:
 
 	// Called by the extractor once every frame has been appended.
 	void finalize(int p_dimension);
+
+	// Thins this in-memory database down to every p_stride-th frame per clip
+	// (always keeping each clip's true last frame, so a non-looping clip's
+	// exact end pose survives), to cut RAM on memory-constrained devices.
+	// Only affects the loaded copy in memory; the .tres/.res on disk is never
+	// touched, so one saved database can run at full density on PC and a
+	// thinned density on mobile just by what MotionMatchingResource::quality
+	// or frame_stride is set to for that export. Irreversible for this loaded
+	// instance -- the discarded frames are gone until the resource is
+	// reloaded fresh. p_stride <= 1 is a no-op.
+	void reduce_frame_stride(int p_stride);
 
 	void clear();
 
