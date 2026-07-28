@@ -145,26 +145,53 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_loop_toggle->set_text("Loop every clip in this database");
 	mm_add_row(this, "Toggle loop (all clips)", _loop_toggle);
 
+	// Integer-only by construction -- a SpinBox has no text field to type
+	// letters into, unlike the Box/Database name LineEdits above it, so this
+	// can never hold anything but a whole number in range.
+	_database_tag = memnew(SpinBox);
+	_database_tag->set_min(1);
+	_database_tag->set_max(100);
+	_database_tag->set_step(1);
+	_database_tag->set_value(1);
+	_database_tag->set_tooltip_text(
+			"Script-facing code name for this database. Several databases can share the "
+			"same tag (e.g. Stand/Walk/Run/Sprint all set to 1) -- play_by_tag(1) on the "
+			"controller picks whichever one best fits the current speed.");
+	mm_add_row(this, "Database tag (script code name)", _database_tag);
+
+	// Collapsed by default: sample rate, yaw offset and the two foot bone
+	// overrides are set once per box/database and rarely touched again, so
+	// hiding them behind one toggle is what keeps the rest of the dock
+	// compact instead of every one of these always taking up a row.
+	_advanced_toggle = memnew(Button);
+	_advanced_toggle->set_text("▸ Build settings (sample rate, yaw offset, foot overrides)");
+	_advanced_toggle->set_toggle_mode(true);
+	add_child(_advanced_toggle);
+
+	_advanced_section = memnew(VBoxContainer);
+	_advanced_section->set_visible(false);
+	add_child(_advanced_section);
+
 	_sample_rate = memnew(SpinBox);
 	_sample_rate->set_min(10);
 	_sample_rate->set_max(120);
 	_sample_rate->set_value(30);
-	mm_add_row(this, "Sample rate (Hz)", _sample_rate);
+	mm_add_row(_advanced_section, "Sample rate (Hz)", _sample_rate);
 
 	_root_yaw_offset = memnew(SpinBox);
 	_root_yaw_offset->set_min(-180);
 	_root_yaw_offset->set_max(180);
 	_root_yaw_offset->set_step(1);
 	_root_yaw_offset->set_value(0);
-	mm_add_row(this, "Root yaw offset (degrees)", _root_yaw_offset);
+	mm_add_row(_advanced_section, "Root yaw offset (degrees)", _root_yaw_offset);
 
 	_left_foot_override = memnew(LineEdit);
 	_left_foot_override->set_placeholder("Leave empty to auto-detect");
-	mm_add_row(this, "Left foot bone (override)", _left_foot_override);
+	mm_add_row(_advanced_section, "Left foot bone (override)", _left_foot_override);
 
 	_right_foot_override = memnew(LineEdit);
 	_right_foot_override->set_placeholder("Leave empty to auto-detect");
-	mm_add_row(this, "Right foot bone (override)", _right_foot_override);
+	mm_add_row(_advanced_section, "Right foot bone (override)", _right_foot_override);
 
 	HBoxContainer *buttons = memnew(HBoxContainer);
 	_scan_button = memnew(Button);
@@ -219,6 +246,8 @@ void MMDatabaseEditor::_ready() {
 	_add_database_button->connect("pressed", Callable(this, "_on_add_database_pressed"));
 	_database_name_edit->connect("text_changed", Callable(this, "_on_database_name_changed"));
 	_loop_toggle->connect("toggled", Callable(this, "_on_loop_toggle_toggled"));
+	_database_tag->connect("value_changed", Callable(this, "_on_database_tag_changed"));
+	_advanced_toggle->connect("pressed", Callable(this, "_on_advanced_toggle_pressed"));
 	_scan_button->connect("pressed", Callable(this, "_on_scan_pressed"));
 	_build_button->connect("pressed", Callable(this, "_on_build_pressed"));
 	_save_button->connect("pressed", Callable(this, "_on_save_pressed"));
@@ -431,6 +460,7 @@ void MMDatabaseEditor::_refresh_database_options() {
 	if (box.is_null()) {
 		_database = Ref<MotionMatchingDatabase>();
 		_database_name_edit->set_text("");
+		_database_tag->set_value(1);
 		return;
 	}
 	const int count = box->get_database_count();
@@ -442,6 +472,7 @@ void MMDatabaseEditor::_refresh_database_options() {
 	if (count == 0) {
 		_database = Ref<MotionMatchingDatabase>();
 		_database_name_edit->set_text("");
+		_database_tag->set_value(1);
 		return;
 	}
 	int active = _extra_database->get_active_database_index();
@@ -451,6 +482,11 @@ void MMDatabaseEditor::_refresh_database_options() {
 	_database_option->select(active);
 	_database = box->get_database(active);
 	_database_name_edit->set_text(_database.is_valid() ? _database->get_name() : "");
+	// Tag defaults to 1 for a brand new (never-built) database, same as the
+	// SpinBox's own default, rather than 0 or -1 -- so a database left
+	// untouched still matches play_by_tag(1) instead of silently matching
+	// nothing.
+	_database_tag->set_value(_database.is_valid() && _database->get_tag() > 0 ? _database->get_tag() : 1);
 }
 
 void MMDatabaseEditor::_on_box_selected(int p_index) {
@@ -546,6 +582,25 @@ void MMDatabaseEditor::_on_loop_toggle_toggled(bool p_pressed) {
 	_log_line(vformat("Set loop = %s for all %d clip(s) in \"%s\".", p_pressed ? "on" : "off",
 					  _database->get_animation_count(), _database->get_name()),
 			Color(0.5f, 1.0f, 0.6f));
+}
+
+void MMDatabaseEditor::_on_database_tag_changed(double p_value) {
+	if (_database.is_null()) {
+		// Not an error -- happens while a box/database is being picked but
+		// nothing has been built yet. The value is picked up from the
+		// SpinBox directly at build time (see _on_build_pressed()) instead.
+		return;
+	}
+	_database->set_tag((int)p_value);
+	_persist_extra_database();
+}
+
+void MMDatabaseEditor::_on_advanced_toggle_pressed() {
+	const bool expanded = _advanced_toggle->is_pressed();
+	_advanced_section->set_visible(expanded);
+	_advanced_toggle->set_text(
+			(expanded ? String("▾ ") : String("▸ ")) +
+			"Build settings (sample rate, yaw offset, foot overrides)");
 }
 
 void MMDatabaseEditor::_on_scan_pressed() {
@@ -726,6 +781,7 @@ void MMDatabaseEditor::_on_build_pressed() {
 	const int active_index = _extra_database->get_active_database_index();
 	Ref<MotionMatchingDatabase> previous = box->get_database(active_index);
 	_database->set_name(previous.is_valid() ? previous->get_name() : _database_name_edit->get_text());
+	_database->set_tag(previous.is_valid() && previous->get_tag() > 0 ? previous->get_tag() : (int)_database_tag->get_value());
 	box->set_database_at(active_index, _database);
 	_persist_extra_database();
 
@@ -832,6 +888,8 @@ void MMDatabaseEditor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_add_database_pressed"), &MMDatabaseEditor::_on_add_database_pressed);
 	ClassDB::bind_method(D_METHOD("_on_database_name_changed", "text"), &MMDatabaseEditor::_on_database_name_changed);
 	ClassDB::bind_method(D_METHOD("_on_loop_toggle_toggled", "pressed"), &MMDatabaseEditor::_on_loop_toggle_toggled);
+	ClassDB::bind_method(D_METHOD("_on_database_tag_changed", "value"), &MMDatabaseEditor::_on_database_tag_changed);
+	ClassDB::bind_method(D_METHOD("_on_advanced_toggle_pressed"), &MMDatabaseEditor::_on_advanced_toggle_pressed);
 	ClassDB::bind_method(D_METHOD("_on_scan_pressed"), &MMDatabaseEditor::_on_scan_pressed);
 	ClassDB::bind_method(D_METHOD("_on_build_pressed"), &MMDatabaseEditor::_on_build_pressed);
 	ClassDB::bind_method(D_METHOD("_on_save_pressed"), &MMDatabaseEditor::_on_save_pressed);
