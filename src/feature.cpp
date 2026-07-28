@@ -8,7 +8,7 @@ using namespace godot;
 // The layout is ordered cheapest first so a quality level is a prefix of the
 // full vector and LOD costs nothing but a smaller loop bound:
 //
-//   [trajectory position][trajectory direction][root velocity]  <- LOW
+//   [trajectory position][trajectory direction][yaw rate][root velocity]  <- LOW
 //   [bone positions]                                            <- MEDIUM
 //   [bone velocities]                                           <- HIGH
 //   [extra]                                                     <- ULTRA
@@ -38,6 +38,11 @@ void MMFeatureSchema::_rebuild_layout() {
 	_offset_trajectory_direction = offset;
 	offset += points * 2;
 
+	_offset_yaw_rate = offset;
+	if (_include_yaw_rate) {
+		offset += 1;
+	}
+
 	_offset_root_velocity = offset;
 	if (_include_root_velocity) {
 		offset += 3;
@@ -63,8 +68,10 @@ void MMFeatureSchema::_rebuild_layout() {
 	for (int i = 0; i < _dimension; i++) {
 		if (i < _offset_trajectory_direction) {
 			groups[i] = MM_GROUP_TRAJECTORY_POSITION;
-		} else if (i < _offset_root_velocity) {
+		} else if (i < _offset_yaw_rate) {
 			groups[i] = MM_GROUP_TRAJECTORY_DIRECTION;
+		} else if (i < _offset_root_velocity) {
+			groups[i] = MM_GROUP_YAW_RATE;
 		} else if (i < _offset_bone_position) {
 			groups[i] = MM_GROUP_ROOT_VELOCITY;
 		} else if (i < _offset_bone_velocity) {
@@ -101,6 +108,11 @@ void MMFeatureSchema::set_include_bone_velocity(bool p_enabled) {
 
 void MMFeatureSchema::set_include_root_velocity(bool p_enabled) {
 	_include_root_velocity = p_enabled;
+	_rebuild_layout();
+}
+
+void MMFeatureSchema::set_include_yaw_rate(bool p_enabled) {
+	_include_yaw_rate = p_enabled;
 	_rebuild_layout();
 }
 
@@ -198,6 +210,7 @@ void MMFeatureSchema::_bind_methods() {
 	MM_BIND_PROPERTY(MMFeatureSchema, Variant::STRING, root_bone)
 	MM_BIND_PROPERTY(MMFeatureSchema, Variant::BOOL, include_bone_velocity)
 	MM_BIND_PROPERTY(MMFeatureSchema, Variant::BOOL, include_root_velocity)
+	MM_BIND_PROPERTY(MMFeatureSchema, Variant::BOOL, include_yaw_rate)
 	MM_BIND_PROPERTY(MMFeatureSchema, Variant::INT, extra_dimensions)
 	MM_BIND_PROPERTY(MMFeatureSchema, Variant::BOOL, include_hands)
 
@@ -213,6 +226,7 @@ void MMFeatureSchema::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_pose_bone_count"), &MMFeatureSchema::get_pose_bone_count);
 	ClassDB::bind_method(D_METHOD("get_trajectory_position_offset"), &MMFeatureSchema::get_trajectory_position_offset);
 	ClassDB::bind_method(D_METHOD("get_trajectory_direction_offset"), &MMFeatureSchema::get_trajectory_direction_offset);
+	ClassDB::bind_method(D_METHOD("get_yaw_rate_offset"), &MMFeatureSchema::get_yaw_rate_offset);
 	ClassDB::bind_method(D_METHOD("get_bone_position_offset"), &MMFeatureSchema::get_bone_position_offset);
 	ClassDB::bind_method(D_METHOD("get_bone_velocity_offset"), &MMFeatureSchema::get_bone_velocity_offset);
 	ClassDB::bind_method(D_METHOD("get_root_velocity_offset"), &MMFeatureSchema::get_root_velocity_offset);
@@ -227,6 +241,7 @@ void MMFeatureSchema::_bind_methods() {
 	BIND_ENUM_CONSTANT(MM_GROUP_POSE_VELOCITY);
 	BIND_ENUM_CONSTANT(MM_GROUP_ROOT_VELOCITY);
 	BIND_ENUM_CONSTANT(MM_GROUP_EXTRA);
+	BIND_ENUM_CONSTANT(MM_GROUP_YAW_RATE);
 
 	BIND_ENUM_CONSTANT(MM_QUALITY_ULTRA);
 	BIND_ENUM_CONSTANT(MM_QUALITY_HIGH);
