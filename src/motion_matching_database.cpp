@@ -199,6 +199,10 @@ void MotionMatchingResource::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_quality"), &MotionMatchingResource::get_quality);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "quality", PROPERTY_HINT_ENUM, "Ultra,High,Medium,Low"),
 			"set_quality", "get_quality");
+	ClassDB::bind_method(D_METHOD("set_frame_stride", "stride"), &MotionMatchingResource::set_frame_stride);
+	ClassDB::bind_method(D_METHOD("get_frame_stride"), &MotionMatchingResource::get_frame_stride);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "frame_stride", PROPERTY_HINT_RANGE, "1,8,1"),
+			"set_frame_stride", "get_frame_stride");
 	MM_BIND_PROPERTY(MotionMatchingResource, Variant::BOOL, debug_enabled)
 
 	ClassDB::bind_method(D_METHOD("validate"), &MotionMatchingResource::validate);
