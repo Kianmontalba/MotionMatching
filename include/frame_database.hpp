@@ -11,6 +11,7 @@
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
+#include <godot_cpp/variant/vector2.hpp>
 
 namespace godot {
 
@@ -108,11 +109,29 @@ private:
 	// further from the current (already-reduced) arrays.
 	int _applied_stride = 1;
 
+	// Grouping tag for MotionMatchingController::play_by_tag() /
+	// MMExtraDatabase::set_active_by_tag(). Purely a script-facing "code
+	// name" -- several separately named databases (e.g. "Stand", "Walk",
+	// "Run", "Sprint") can share the same tag so a script only ever has to
+	// remember one number ("locomotion = 1") instead of every database's
+	// name. -1 means untagged (never matched by play_by_tag()). 1-100 is the
+	// range the dock's tag field accepts, but nothing here enforces that --
+	// any int is stored as given.
+	int _tag = -1;
+
 protected:
 	static void _bind_methods();
 
 public:
 	MM_ACCESSORS(String, name)
+	MM_ACCESSORS(int, tag)
+
+	// Aggregate [min, max] of every animation entry's speed_min/speed_max in
+	// this database (x = min, y = max). Used by
+	// MMExtraDatabase::set_active_by_tag() to pick the best-fitting database
+	// among several sharing the same tag, based on the controller's current
+	// speed. Returns Vector2(0, 0) if this database has no animations.
+	Vector2 get_speed_range() const;
 
 	void set_schema(const Ref<MMFeatureSchema> &p_schema);
 	Ref<MMFeatureSchema> get_schema() const { return _schema; }
