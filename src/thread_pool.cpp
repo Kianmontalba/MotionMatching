@@ -47,7 +47,7 @@ void MMSearchWorker::stop() {
 }
 
 uint64_t MMSearchWorker::submit(const float *p_query, int p_dimension, const MMSearchFilter &p_filter,
-		const MMSearchContext &p_context) {
+		const MMSearchContext &p_context, int p_max_dimension) {
 	if (!_running.load()) {
 		return 0;
 	}
@@ -63,6 +63,7 @@ uint64_t MMSearchWorker::submit(const float *p_query, int p_dimension, const MMS
 		}
 		_pending.filter = p_filter;
 		_pending.context = p_context;
+		_pending.max_dimension = p_max_dimension;
 		_pending.id = _next_id++;
 		id = _pending.id;
 		_has_request.store(true);
@@ -106,7 +107,7 @@ void MMSearchWorker::_thread_main() {
 		Response response;
 		response.id = request.id;
 		response.result = _search->search(request.query.ptr(), cost, request.filter,
-				request.context, response.stats);
+				request.context, response.stats, request.max_dimension);
 
 		{
 			std::lock_guard<std::mutex> lock(_mutex);
