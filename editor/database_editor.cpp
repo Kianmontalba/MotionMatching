@@ -118,6 +118,14 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_resource_picker->set_base_type("MotionMatchingResource");
 	_add_compact_box(_left_stack, "Motion Matching Resource", _resource_picker);
 
+	_use_external_skeleton = memnew(CheckButton);
+	_use_external_skeleton->set_text("Use external skeleton");
+	_use_external_skeleton->set_tooltip_text(
+			"Off: the first Skeleton3D in the open scene is found automatically.\n"
+			"On: point at a Skeleton3D the dock cannot guess, the same way "
+			"BoneAttachment3D's external skeleton works.");
+	_add_compact_box(_left_stack, "Skeleton source", _use_external_skeleton);
+
 	_skeleton_path = memnew(MMNodePathField);
 	_skeleton_path->set_text("%GeneralSkeleton");
 	_skeleton_path->set_placeholder("Type a path, drag a node in from the Scene dock, or use Pick...");
@@ -130,7 +138,10 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	HBoxContainer *skeleton_row = memnew(HBoxContainer);
 	skeleton_row->add_child(_skeleton_path);
 	skeleton_row->add_child(_skeleton_picker_button);
-	_add_compact_box(_left_stack, "Skeleton node path", skeleton_row);
+	_skeleton_box = _add_compact_box(_left_stack, "Skeleton node path", skeleton_row);
+	// Internal is the default, so the path box starts hidden -- the dock only
+	// ever shows a field there is actually a reason to fill in.
+	_skeleton_box->set_visible(false);
 
 	_skeleton_popup = memnew(PopupMenu);
 	add_child(_skeleton_popup);
@@ -219,13 +230,16 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_root_yaw_offset->set_value(0);
 	_add_compact_box(_advanced_section, "Root yaw offset (degrees)", _root_yaw_offset);
 
-	_left_foot_override = memnew(LineEdit);
-	_left_foot_override->set_placeholder("Leave empty to auto-detect");
+	_left_foot_override = memnew(OptionButton);
+	_left_foot_override->set_h_size_flags(Control::SIZE_EXPAND_FILL);
 	_add_compact_box(_advanced_section, "Left foot bone (override)", _left_foot_override);
 
-	_right_foot_override = memnew(LineEdit);
-	_right_foot_override->set_placeholder("Leave empty to auto-detect");
+	_right_foot_override = memnew(OptionButton);
+	_right_foot_override->set_h_size_flags(Control::SIZE_EXPAND_FILL);
 	_add_compact_box(_advanced_section, "Right foot bone (override)", _right_foot_override);
+
+	// Starts as auto-detect only. Filled the moment a skeleton resolves.
+	_refresh_bone_pickers(nullptr);
 
 	// Any future field/box gets added here, inside _left_stack (or inside
 	// _advanced_section) -- it only grows the scroll content, never the dock.
@@ -269,12 +283,13 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_split->add_child(_right_root);
 
 	_clip_table = memnew(Tree);
-	_clip_table->set_columns(4);
+	_clip_table->set_columns(5);
 	_clip_table->set_column_titles_visible(true);
-	_clip_table->set_column_title(0, "Clip");
-	_clip_table->set_column_title(1, "Category");
-	_clip_table->set_column_title(2, "Tags");
-	_clip_table->set_column_title(3, "Length");
+	_clip_table->set_column_title(0, "Group");
+	_clip_table->set_column_title(1, "Clip");
+	_clip_table->set_column_title(2, "Category");
+	_clip_table->set_column_title(3, "Tags");
+	_clip_table->set_column_title(4, "Length");
 	_clip_table->set_h_size_flags(Control::SIZE_EXPAND_FILL);
 	_clip_table->set_v_size_flags(Control::SIZE_EXPAND_FILL);
 	_right_root->add_child(_clip_table);
@@ -289,8 +304,9 @@ void MMDatabaseEditor::_ready() {
 	_skeleton_path->connect("text_changed", Callable(this, "_on_skeleton_path_changed"));
 	_skeleton_picker_button->connect("pressed", Callable(this, "_on_skeleton_picker_pressed"));
 	_skeleton_popup->connect("index_pressed", Callable(this, "_on_skeleton_popup_selected"));
-	_left_foot_override->connect("text_changed", Callable(this, "_on_left_foot_override_changed"));
-	_right_foot_override->connect("text_changed", Callable(this, "_on_right_foot_override_changed"));
+	_use_external_skeleton->connect("toggled", Callable(this, "_on_use_external_skeleton_toggled"));
+	_left_foot_override->connect("item_selected", Callable(this, "_on_left_foot_override_changed"));
+	_right_foot_override->connect("item_selected", Callable(this, "_on_right_foot_override_changed"));
 	_box_option->connect("item_selected", Callable(this, "_on_box_selected"));
 	_add_box_button->connect("pressed", Callable(this, "_on_add_box_pressed"));
 	_box_name_edit->connect("text_changed", Callable(this, "_on_box_name_changed"));
@@ -316,18 +332,132 @@ void MMDatabaseEditor::_log_line(const String &p_text, const Color &p_color) {
 	_log->pop();
 }
 
-Skeleton3D *MMDatabaseEditor::_resolve_skeleton() {
-	Node *root = EditorInterface::get_singleton()->get_edited_scene_root();
-	if (root == nullptr) {
-		_log_line("No scene is open.", Color(1, 0.5f, 0.4f));
+Skeleton3D *MMDatabaseEditor::_find_first_skeleton(Node *p_node) const {
+	if (p_node == nullptr) {
 		return nullptr;
 	}
+	Skeleton3D *self = Object::cast_to<Skeleton3D>(p_node);
+	if (self != nullptr) {
+		return self;
+	}
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		Skeleton3D *found = _find_first_skeleton(p_node->get_child(i));
+		if (found != nullptr) {
+			return found;
+		}
+	}
+	return nullptr;
+}
+
+Skeleton3D *MMDatabaseEditor::_resolve_skeleton(bool p_quiet) {
+	Node *root = EditorInterface::get_singleton()->get_edited_scene_root();
+	if (root == nullptr) {
+		if (!p_quiet) {
+			_log_line("No scene is open.", Color(1, 0.5f, 0.4f));
+		}
+		return nullptr;
+	}
+
+	// Internal mode: no path is involved at all, so a skeleton sitting
+	// anywhere in the scene still resolves -- including one that is not a
+	// parent of anything this dock knows about.
+	if (!_use_external_skeleton->is_pressed()) {
+		Skeleton3D *found = _find_first_skeleton(root);
+		if (found == nullptr && !p_quiet) {
+			_log_line("No Skeleton3D found in the open scene. Switch on "
+					  "\"Use external skeleton\" to point at one by path.",
+					Color(1, 0.5f, 0.4f));
+		}
+		return found;
+	}
+
 	Node *node = root->get_node_or_null(NodePath(_skeleton_path->get_text()));
 	Skeleton3D *skeleton = Object::cast_to<Skeleton3D>(node);
-	if (skeleton == nullptr) {
+	if (skeleton == nullptr && !p_quiet) {
 		_log_line("Could not resolve a Skeleton3D at that path.", Color(1, 0.5f, 0.4f));
 	}
 	return skeleton;
+}
+
+void MMDatabaseEditor::_on_use_external_skeleton_toggled(bool p_pressed) {
+	_skeleton_box->set_visible(p_pressed);
+
+	// The path doubles as the stored mode: cleared means internal. Written
+	// through the existing handler so the save-to-disk path stays in one
+	// place instead of being duplicated here.
+	if (!p_pressed) {
+		_on_skeleton_path_changed(String());
+	} else {
+		_on_skeleton_path_changed(_skeleton_path->get_text());
+	}
+	_update_bone_pickers();
+}
+
+void MMDatabaseEditor::_refresh_bone_pickers(Skeleton3D *p_skeleton) {
+	// Remembered before clearing so a re-resolve onto a different rig keeps
+	// the user's choice whenever that same bone name still exists.
+	const String left = _mm_resource.is_valid() ? _mm_resource->get_left_foot_override() : String();
+	const String right = _mm_resource.is_valid() ? _mm_resource->get_right_foot_override() : String();
+
+	_left_foot_override->clear();
+	_right_foot_override->clear();
+	_left_foot_override->add_item("(auto-detect)");
+	_right_foot_override->add_item("(auto-detect)");
+
+	if (p_skeleton != nullptr) {
+		const int count = p_skeleton->get_bone_count();
+		for (int i = 0; i < count; i++) {
+			const String bone = p_skeleton->get_bone_name(i);
+			_left_foot_override->add_item(bone);
+			_right_foot_override->add_item(bone);
+		}
+	}
+
+	_select_bone_option(_left_foot_override, left);
+	_select_bone_option(_right_foot_override, right);
+
+	// Nothing to choose from until a skeleton resolves, so the dropdowns say
+	// so instead of silently offering a single useless entry.
+	const bool has_bones = p_skeleton != nullptr && p_skeleton->get_bone_count() > 0;
+	_left_foot_override->set_disabled(!has_bones);
+	_right_foot_override->set_disabled(!has_bones);
+}
+
+void MMDatabaseEditor::_select_bone_option(OptionButton *p_option, const String &p_name) {
+	if (p_name.is_empty()) {
+		p_option->select(0);
+		return;
+	}
+	for (int i = 1; i < p_option->get_item_count(); i++) {
+		if (p_option->get_item_text(i) == p_name) {
+			p_option->select(i);
+			return;
+		}
+	}
+	// The stored bone is not on this skeleton -- fall back to auto-detect
+	// rather than showing a selection that would not survive a build.
+	p_option->select(0);
+}
+
+String MMDatabaseEditor::_selected_bone(OptionButton *p_option) const {
+	const int index = p_option->get_selected();
+	// Index 0 is the auto-detect entry and -1 means nothing is selected --
+	// both mean "no manual override, leave this role to detection".
+	return index <= 0 ? String() : p_option->get_item_text(index);
+}
+
+void MMDatabaseEditor::_update_bone_pickers() {
+	_refresh_bone_pickers(_resolve_skeleton(true));
+}
+
+String MMDatabaseEditor::_group_of(const String &p_name) {
+	const int slash = p_name.rfind("/");
+	return slash < 0 ? String() : p_name.substr(0, slash);
+}
+
+String MMDatabaseEditor::_clip_of(const String &p_name) {
+	const int slash = p_name.rfind("/");
+	return slash < 0 ? p_name : p_name.substr(slash + 1);
 }
 
 void MMDatabaseEditor::_on_resource_picked(const Ref<Resource> &p_resource) {
@@ -344,11 +474,16 @@ void MMDatabaseEditor::_on_resource_picked(const Ref<Resource> &p_resource) {
 	_extra_database = _mm_resource->get_database();
 	_schema = _mm_resource->get_schema();
 	_refresh_box_options();
-	if (!_mm_resource->get_skeleton_path().is_empty()) {
+	// A stored path means this resource was set up in external mode; an empty
+	// one means internal. set_pressed_no_signal() so restoring the mode does
+	// not immediately write it back and re-save the resource.
+	const bool external = !_mm_resource->get_skeleton_path().is_empty();
+	_use_external_skeleton->set_pressed_no_signal(external);
+	_skeleton_box->set_visible(external);
+	if (external) {
 		_skeleton_path->set_text(String(_mm_resource->get_skeleton_path()));
 	}
-	_left_foot_override->set_text(_mm_resource->get_left_foot_override());
-	_right_foot_override->set_text(_mm_resource->get_right_foot_override());
+	_update_bone_pickers();
 
 	if (_library.is_valid()) {
 		_clip_settings = MMAnimationLibraryTools::auto_tag_library(_library);
@@ -406,6 +541,7 @@ void MMDatabaseEditor::_on_skeleton_path_changed(const String &p_text) {
 	// so a dropped or typed path survives closing the dock, switching
 	// scenes, or an addon reload, instead of resetting to the placeholder.
 	_mm_resource->set_skeleton_path(NodePath(p_text));
+	_update_bone_pickers();
 	if (_mm_resource->get_path().is_empty()) {
 		return;
 	}
@@ -417,10 +553,13 @@ void MMDatabaseEditor::_on_skeleton_path_changed(const String &p_text) {
 	}
 }
 
-void MMDatabaseEditor::_on_left_foot_override_changed(const String &p_text) {
+void MMDatabaseEditor::_on_left_foot_override_changed(int) {
 	if (_mm_resource.is_null()) {
 		return;
 	}
+	// Item 0 is the auto-detect entry, which stores an empty override and
+	// leaves the role to MMSkeletonProfile's own detection.
+	const String p_text = _selected_bone(_left_foot_override);
 	// Same persist-immediately pattern as _on_skeleton_path_changed().
 	_mm_resource->set_left_foot_override(p_text);
 	if (_mm_resource->get_path().is_empty()) {
@@ -434,10 +573,11 @@ void MMDatabaseEditor::_on_left_foot_override_changed(const String &p_text) {
 	}
 }
 
-void MMDatabaseEditor::_on_right_foot_override_changed(const String &p_text) {
+void MMDatabaseEditor::_on_right_foot_override_changed(int) {
 	if (_mm_resource.is_null()) {
 		return;
 	}
+	const String p_text = _selected_bone(_right_foot_override);
 	_mm_resource->set_right_foot_override(p_text);
 	if (_mm_resource->get_path().is_empty()) {
 		return;
@@ -676,18 +816,32 @@ void MMDatabaseEditor::_populate_table() {
 	static const char *category_names[] = { "Locomotion", "Airborne", "Traversal", "Combat",
 		"Interaction", "Custom" };
 
+	// When the names carry no prefix of their own, every clip in this library
+	// shares one group: the library itself. That keeps the column meaningful
+	// for the common single-library setup instead of showing a blank column.
+	const String library_group = _library->get_path().is_empty()
+			? String("Ungrouped")
+			: _library->get_path().get_file().get_basename();
+
 	for (int i = 0; i < names.size(); i++) {
 		Ref<Animation> animation = _library->get_animation(names[i]);
 		const Dictionary settings = _clip_settings.get(names[i], Dictionary());
 		const int category = settings.get("category", 0);
 		const int tags = settings.get("tags", 0);
 
+		const String group = _group_of(names[i]);
+
 		TreeItem *item = _clip_table->create_item(root);
-		item->set_text(0, names[i]);
-		item->set_text(1, category >= 0 && category < MM_CATEGORY_MAX ? category_names[category] : "?");
-		item->set_text(2, String::num_int64(tags));
-		item->set_text(3, animation.is_valid() ? vformat("%.2fs", animation->get_length()) : "-");
-		item->set_editable(2, true);
+		// The full library key lives in metadata, not in a column: the visible
+		// text is split across Group and Clip, so _on_clip_edited() would have
+		// no way to rebuild it from what is displayed.
+		item->set_metadata(0, names[i]);
+		item->set_text(0, group.is_empty() ? library_group : group);
+		item->set_text(1, _clip_of(names[i]));
+		item->set_text(2, category >= 0 && category < MM_CATEGORY_MAX ? category_names[category] : "?");
+		item->set_text(3, String::num_int64(tags));
+		item->set_text(4, animation.is_valid() ? vformat("%.2fs", animation->get_length()) : "-");
+		item->set_editable(3, true);
 	}
 }
 
@@ -795,8 +949,8 @@ void MMDatabaseEditor::_on_build_pressed() {
 	extractor->set_sample_rate((float)_sample_rate->get_value());
 	extractor->set_root_yaw_offset_degrees((float)_root_yaw_offset->get_value());
 
-	const String left_foot = _left_foot_override->get_text().strip_edges();
-	const String right_foot = _right_foot_override->get_text().strip_edges();
+	const String left_foot = _selected_bone(_left_foot_override);
+	const String right_foot = _selected_bone(_right_foot_override);
 	if (!left_foot.is_empty() || !right_foot.is_empty()) {
 		// Only these two roles are ever set by hand here -- everything else
 		// stays on auto-detect (the extractor's auto_detect_profile default
@@ -919,10 +1073,11 @@ void MMDatabaseEditor::_on_clip_edited() {
 	if (item == nullptr) {
 		return;
 	}
-	Dictionary settings = _clip_settings.get(item->get_text(0), Dictionary());
-	settings["tags"] = item->get_text(2).to_int();
+	const String key = item->get_metadata(0);
+	Dictionary settings = _clip_settings.get(key, Dictionary());
+	settings["tags"] = item->get_text(3).to_int();
 	settings["category"] = MMFeatureExtractor::guess_category_from_tags(settings["tags"]);
-	_clip_settings[item->get_text(0)] = settings;
+	_clip_settings[key] = settings;
 }
 
 void MMDatabaseEditor::_bind_methods() {
@@ -931,8 +1086,9 @@ void MMDatabaseEditor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_on_skeleton_path_changed", "text"), &MMDatabaseEditor::_on_skeleton_path_changed);
 	ClassDB::bind_method(D_METHOD("_on_skeleton_picker_pressed"), &MMDatabaseEditor::_on_skeleton_picker_pressed);
 	ClassDB::bind_method(D_METHOD("_on_skeleton_popup_selected", "index"), &MMDatabaseEditor::_on_skeleton_popup_selected);
-	ClassDB::bind_method(D_METHOD("_on_left_foot_override_changed", "text"), &MMDatabaseEditor::_on_left_foot_override_changed);
-	ClassDB::bind_method(D_METHOD("_on_right_foot_override_changed", "text"), &MMDatabaseEditor::_on_right_foot_override_changed);
+	ClassDB::bind_method(D_METHOD("_on_use_external_skeleton_toggled", "pressed"), &MMDatabaseEditor::_on_use_external_skeleton_toggled);
+	ClassDB::bind_method(D_METHOD("_on_left_foot_override_changed", "index"), &MMDatabaseEditor::_on_left_foot_override_changed);
+	ClassDB::bind_method(D_METHOD("_on_right_foot_override_changed", "index"), &MMDatabaseEditor::_on_right_foot_override_changed);
 	ClassDB::bind_method(D_METHOD("_on_box_selected", "index"), &MMDatabaseEditor::_on_box_selected);
 	ClassDB::bind_method(D_METHOD("_on_add_box_pressed"), &MMDatabaseEditor::_on_add_box_pressed);
 	ClassDB::bind_method(D_METHOD("_on_box_name_changed", "text"), &MMDatabaseEditor::_on_box_name_changed);
