@@ -247,23 +247,8 @@ bool MMFeatureExtractor::_prepare(Skeleton3D *p_skeleton) {
 	if (_auto_detect_profile && !_profile->is_detected()) {
 		if (!_profile->auto_detect(p_skeleton)) {
 			_last_prepare_report = _profile->get_detection_report();
-			// Auto-detect failing does not automatically mean the build has
-			// to stop: it only means the *heuristics* could not confirm every
-			// role on this particular rig. If the three roles the pipeline
-			// actually depends on (pelvis + both feet -- see
-			// get_default_pose_bones()) were already locked in by hand
-			// (manual overrides in the dock), proceed with those instead of
-			// aborting the whole build over roles nothing here needs.
-			const bool has_minimum_roles = _profile->has_role(MM_BONE_PELVIS) &&
-					_profile->has_role(MM_BONE_LEFT_FOOT) &&
-					_profile->has_role(MM_BONE_RIGHT_FOOT);
-			if (!has_minimum_roles) {
-				ERR_PRINT("Skeleton profile detection failed: " + _last_prepare_report);
-				return false;
-			}
-			WARN_PRINT("Skeleton auto-detect did not confirm every role, but pelvis and both feet "
-					   "are set manually -- continuing with those. Detection report: " +
-					_last_prepare_report);
+			ERR_PRINT("Skeleton profile detection failed: " + _last_prepare_report);
+			return false;
 		}
 	}
 	if (_analyzer.is_null()) {
