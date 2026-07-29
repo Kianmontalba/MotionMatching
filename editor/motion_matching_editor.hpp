@@ -23,10 +23,13 @@
 #include <godot_cpp/classes/label.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/option_button.hpp>
+#include <godot_cpp/classes/panel_container.hpp>
 #include <godot_cpp/classes/popup_menu.hpp>
 #include <godot_cpp/classes/progress_bar.hpp>
 #include <godot_cpp/classes/rich_text_label.hpp>
+#include <godot_cpp/classes/scroll_container.hpp>
 #include <godot_cpp/classes/spin_box.hpp>
+#include <godot_cpp/classes/split_container.hpp>
 #include <godot_cpp/classes/tab_container.hpp>
 #include <godot_cpp/classes/tree.hpp>
 #include <godot_cpp/classes/v_box_container.hpp>
@@ -64,6 +67,23 @@ class MMDatabaseEditor : public VBoxContainer {
 	GDCLASS(MMDatabaseEditor, VBoxContainer);
 
 private:
+	// Compact two-column layout: settings live in a narrow left column with
+	// their own independent scroll, the clip table takes the wide right
+	// column. Splitting the scroll this way means adding a new setting field
+	// later only grows _left_stack inside _left_scroll -- it never grows the
+	// dock itself, so the pinned action row / progress bar / log below it can
+	// never get pushed off the bottom of the screen.
+	HSplitContainer *_split = nullptr;
+	VBoxContainer *_left_root = nullptr;
+	ScrollContainer *_left_scroll = nullptr;
+	VBoxContainer *_left_stack = nullptr;
+	VBoxContainer *_right_root = nullptr;
+
+	// Wraps a single field as its own small labeled box, matching the
+	// "one setting per box, stacked" layout instead of one full-width row
+	// per field.
+	PanelContainer *_add_compact_box(VBoxContainer *p_parent, const String &p_label, Control *p_control);
+
 	MMNodePathField *_skeleton_path = nullptr;
 	// Lets the user browse every Skeleton3D actually present in the current
 	// scene instead of typing a path or having to drag the node in from the
