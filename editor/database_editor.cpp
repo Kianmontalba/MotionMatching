@@ -69,23 +69,54 @@ void MMNodePathField::_drop_data(const Vector2 &p_point, const Variant &p_data) 
 void MMNodePathField::_bind_methods() {
 }
 
-// Small helper for the repetitive "label plus field on one row" layout.
-static HBoxContainer *mm_add_row(VBoxContainer *p_parent, const String &p_label, Control *p_control) {
-	HBoxContainer *row = memnew(HBoxContainer);
+// Wraps one field as its own small labeled box (small label on top, the
+// control right under it) -- this is what lets a narrow left column read as
+// a stack of compact boxes instead of one full-width row per field.
+PanelContainer *MMDatabaseEditor::_add_compact_box(VBoxContainer *p_parent, const String &p_label, Control *p_control) {
+	PanelContainer *box = memnew(PanelContainer);
+	VBoxContainer *inner = memnew(VBoxContainer);
+	inner->add_theme_constant_override("separation", 2);
+	box->add_child(inner);
+
 	Label *label = memnew(Label);
 	label->set_text(p_label);
-	label->set_custom_minimum_size(Vector2(180, 0));
-	row->add_child(label);
+	label->add_theme_font_size_override("font_size", 11);
+	inner->add_child(label);
+
 	p_control->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	row->add_child(p_control);
-	p_parent->add_child(row);
-	return row;
+	inner->add_child(p_control);
+
+	p_parent->add_child(box);
+	return box;
 }
 
 MMDatabaseEditor::MMDatabaseEditor() {
+	add_theme_constant_override("separation", 4);
+
+	_split = memnew(HSplitContainer);
+	_split->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	_split->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	add_child(_split);
+
+	// ---- Left column: every setting, one compact box each, its own scroll.
+	_left_root = memnew(VBoxContainer);
+	_left_root->set_custom_minimum_size(Vector2(300, 0));
+	_left_root->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	_split->add_child(_left_root);
+
+	_left_scroll = memnew(ScrollContainer);
+	_left_scroll->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	_left_scroll->set_horizontal_scroll_mode(ScrollContainer::SCROLL_MODE_DISABLED);
+	_left_root->add_child(_left_scroll);
+
+	_left_stack = memnew(VBoxContainer);
+	_left_stack->add_theme_constant_override("separation", 4);
+	_left_stack->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	_left_scroll->add_child(_left_stack);
+
 	_resource_picker = memnew(EditorResourcePicker);
 	_resource_picker->set_base_type("MotionMatchingResource");
-	mm_add_row(this, "Motion Matching Resource", _resource_picker);
+	_add_compact_box(_left_stack, "Motion Matching Resource", _resource_picker);
 
 	_skeleton_path = memnew(MMNodePathField);
 	_skeleton_path->set_text("%GeneralSkeleton");
@@ -99,7 +130,7 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	HBoxContainer *skeleton_row = memnew(HBoxContainer);
 	skeleton_row->add_child(_skeleton_path);
 	skeleton_row->add_child(_skeleton_picker_button);
-	mm_add_row(this, "Skeleton node path", skeleton_row);
+	_add_compact_box(_left_stack, "Skeleton node path", skeleton_row);
 
 	_skeleton_popup = memnew(PopupMenu);
 	add_child(_skeleton_popup);
@@ -111,7 +142,7 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	// which this control's own state would otherwise survive.
 	_library_picker = memnew(EditorResourcePicker);
 	_library_picker->set_base_type("AnimationLibrary");
-	mm_add_row(this, "Animation library", _library_picker);
+	_add_compact_box(_left_stack, "Animation library", _library_picker);
 
 	_box_option = memnew(OptionButton);
 	_box_option->set_h_size_flags(Control::SIZE_EXPAND_FILL);
@@ -121,11 +152,11 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	HBoxContainer *box_row = memnew(HBoxContainer);
 	box_row->add_child(_box_option);
 	box_row->add_child(_add_box_button);
-	mm_add_row(this, "Animation set (box)", box_row);
+	_add_compact_box(_left_stack, "Animation set (box)", box_row);
 
 	_box_name_edit = memnew(LineEdit);
 	_box_name_edit->set_placeholder("Name this set, e.g. Pistol");
-	mm_add_row(this, "Box name", _box_name_edit);
+	_add_compact_box(_left_stack, "Box name", _box_name_edit);
 
 	_database_option = memnew(OptionButton);
 	_database_option->set_h_size_flags(Control::SIZE_EXPAND_FILL);
@@ -135,15 +166,15 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	HBoxContainer *database_row = memnew(HBoxContainer);
 	database_row->add_child(_database_option);
 	database_row->add_child(_add_database_button);
-	mm_add_row(this, "Database", database_row);
+	_add_compact_box(_left_stack, "Database", database_row);
 
 	_database_name_edit = memnew(LineEdit);
 	_database_name_edit->set_placeholder("Name this database, e.g. Walk");
-	mm_add_row(this, "Database name", _database_name_edit);
+	_add_compact_box(_left_stack, "Database name", _database_name_edit);
 
 	_loop_toggle = memnew(CheckButton);
 	_loop_toggle->set_text("Loop every clip in this database");
-	mm_add_row(this, "Toggle loop (all clips)", _loop_toggle);
+	_add_compact_box(_left_stack, "Toggle loop (all clips)", _loop_toggle);
 
 	// Integer-only by construction -- a SpinBox has no text field to type
 	// letters into, unlike the Box/Database name LineEdits above it, so this
@@ -157,42 +188,51 @@ MMDatabaseEditor::MMDatabaseEditor() {
 			"Script-facing code name for this database. Several databases can share the "
 			"same tag (e.g. Stand/Walk/Run/Sprint all set to 1) -- play_by_tag(1) on the "
 			"controller picks whichever one best fits the current speed.");
-	mm_add_row(this, "Database tag (script code name)", _database_tag);
+	_add_compact_box(_left_stack, "Database tag (script code name)", _database_tag);
 
 	// Collapsed by default: sample rate, yaw offset and the two foot bone
 	// overrides are set once per box/database and rarely touched again, so
-	// hiding them behind one toggle is what keeps the rest of the dock
-	// compact instead of every one of these always taking up a row.
+	// hiding them behind one toggle -- inside the same left scroll -- is what
+	// keeps this "all components" section from ever pushing the dock taller.
+	// ASCII-only text: the previous unicode arrow glyph (U+25B8) rendered as
+	// mojibake in some editor builds depending on how the .cpp source file's
+	// encoding got read.
 	_advanced_toggle = memnew(Button);
-	_advanced_toggle->set_text("▸ Build settings (sample rate, yaw offset, foot overrides)");
+	_advanced_toggle->set_text("[+] All components (sample rate, yaw offset, foot overrides)");
 	_advanced_toggle->set_toggle_mode(true);
-	add_child(_advanced_toggle);
+	_left_stack->add_child(_advanced_toggle);
 
 	_advanced_section = memnew(VBoxContainer);
 	_advanced_section->set_visible(false);
-	add_child(_advanced_section);
+	_left_stack->add_child(_advanced_section);
 
 	_sample_rate = memnew(SpinBox);
 	_sample_rate->set_min(10);
 	_sample_rate->set_max(120);
 	_sample_rate->set_value(30);
-	mm_add_row(_advanced_section, "Sample rate (Hz)", _sample_rate);
+	_add_compact_box(_advanced_section, "Sample rate (Hz)", _sample_rate);
 
 	_root_yaw_offset = memnew(SpinBox);
 	_root_yaw_offset->set_min(-180);
 	_root_yaw_offset->set_max(180);
 	_root_yaw_offset->set_step(1);
 	_root_yaw_offset->set_value(0);
-	mm_add_row(_advanced_section, "Root yaw offset (degrees)", _root_yaw_offset);
+	_add_compact_box(_advanced_section, "Root yaw offset (degrees)", _root_yaw_offset);
 
 	_left_foot_override = memnew(LineEdit);
 	_left_foot_override->set_placeholder("Leave empty to auto-detect");
-	mm_add_row(_advanced_section, "Left foot bone (override)", _left_foot_override);
+	_add_compact_box(_advanced_section, "Left foot bone (override)", _left_foot_override);
 
 	_right_foot_override = memnew(LineEdit);
 	_right_foot_override->set_placeholder("Leave empty to auto-detect");
-	mm_add_row(_advanced_section, "Right foot bone (override)", _right_foot_override);
+	_add_compact_box(_advanced_section, "Right foot bone (override)", _right_foot_override);
 
+	// Any future field/box gets added here, inside _left_stack (or inside
+	// _advanced_section) -- it only grows the scroll content, never the dock.
+
+	// ---- Pinned below the left scroll, always visible regardless of how
+	// long the settings stack above grows: the primary actions, progress,
+	// and the log/debug readout.
 	HBoxContainer *buttons = memnew(HBoxContainer);
 	_scan_button = memnew(Button);
 	_scan_button->set_text("Scan library");
@@ -209,11 +249,24 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_save_button = memnew(Button);
 	_save_button->set_text("Save");
 	buttons->add_child(_save_button);
-	add_child(buttons);
+	_left_root->add_child(buttons);
 
 	_progress = memnew(ProgressBar);
 	_progress->set_max(1.0);
-	add_child(_progress);
+	_left_root->add_child(_progress);
+
+	_log = memnew(RichTextLabel);
+	_log->set_custom_minimum_size(Vector2(0, 90));
+	_left_root->add_child(_log);
+
+	// ---- Right column: the clip table gets the rest of the width, and
+	// scrolls on its own (Tree already scrolls internally once its content
+	// overflows -- wrapping it in a second ScrollContainer would just fight
+	// that native scrollbar, so it is left to fill its column directly).
+	_right_root = memnew(VBoxContainer);
+	_right_root->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	_right_root->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	_split->add_child(_right_root);
 
 	_clip_table = memnew(Tree);
 	_clip_table->set_columns(4);
@@ -222,13 +275,12 @@ MMDatabaseEditor::MMDatabaseEditor() {
 	_clip_table->set_column_title(1, "Category");
 	_clip_table->set_column_title(2, "Tags");
 	_clip_table->set_column_title(3, "Length");
-	_clip_table->set_v_size_flags(SIZE_EXPAND_FILL);
-	_clip_table->set_custom_minimum_size(Vector2(0, 160));
-	add_child(_clip_table);
+	_clip_table->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	_clip_table->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	_right_root->add_child(_clip_table);
 
-	_log = memnew(RichTextLabel);
-	_log->set_custom_minimum_size(Vector2(0, 90));
-	add_child(_log);
+	// Right column gets most of the width; left stays a fixed compact strip.
+	_split->set_split_offset(300);
 }
 
 void MMDatabaseEditor::_ready() {
@@ -599,8 +651,8 @@ void MMDatabaseEditor::_on_advanced_toggle_pressed() {
 	const bool expanded = _advanced_toggle->is_pressed();
 	_advanced_section->set_visible(expanded);
 	_advanced_toggle->set_text(
-			(expanded ? String("▾ ") : String("▸ ")) +
-			"Build settings (sample rate, yaw offset, foot overrides)");
+			(expanded ? String("[-] ") : String("[+] ")) +
+			"All components (sample rate, yaw offset, foot overrides)");
 }
 
 void MMDatabaseEditor::_on_scan_pressed() {
