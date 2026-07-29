@@ -174,6 +174,42 @@ void MotionMatchingController::set_animation_tree_path(const NodePath &p_path) {
 	}
 }
 
+bool MotionMatchingController::play_by_tag(int p_tag) {
+	if (_resource.is_null()) {
+		return false;
+	}
+	Ref<MMExtraDatabase> extra_database = _resource->get_database();
+	if (extra_database.is_null()) {
+		return false;
+	}
+
+	// Current speed is what lets several same-tagged databases
+	// (Stand/Walk/Run/Sprint, all tag 1) auto-resolve to the right one --
+	// see MMExtraDatabase::set_active_by_tag(). Desired velocity is
+	// preferred over current velocity when it's moving (it reflects intent
+	// a frame earlier than the smoothed trajectory does); falls back to
+	// current velocity when there is no desired input (e.g. an AI or replay
+	// driving set_velocity() directly without ever calling
+	// set_desired_velocity()).
+	const float desired_speed = _desired_velocity.length();
+	const float reference_speed = desired_speed > 0.001f ? desired_speed : _velocity.length();
+
+	if (!extra_database->set_active_by_tag(p_tag, reference_speed)) {
+		return false;
+	}
+
+	// Same restart sequence set_resource() uses: stop the worker before
+	// _sync_from_resource()/rebuild() can reassign the Refs (_database,
+	// _schema, _cost_function) it may still hold a raw pointer into from an
+	// in-flight async search.
+	if (is_inside_tree()) {
+		_worker.stop();
+	}
+	_sync_from_resource();
+	rebuild();
+	return true;
+}
+
 void MotionMatchingController::rebuild() {
 	if (_database.is_null() || _database->get_frame_count() == 0) {
 		return;
@@ -1025,9 +1061,12 @@ Dictionary MotionMatchingController::get_debug_info() const {
 		// buckets a traditional turn-in-place clip set is usually authored
 		// around -- see mm_turn_bucket_for_degrees()'s comment for why this
 		// isn't a stored tag. Gameplay code can use this to bias which
-		// pre-tagged clip group it looks for; the continuous yaw-rate
-		// feature (schema-level, see MMFeatureSchema::get_yaw_rate_offset())
-		// is what actually drives the search itself.
+		// pre-tagged clip group it looks for. This is debug/gameplay-facing
+		// classification only -- the search itself no longer has a
+		// dedicated yaw-rate feature dimension (removed after it
+		// contributed to an OOM crash on low-memory devices when combined
+		// with the other optional feature toggles); turn matching now comes
+		// entirely from the trajectory direction samples.
 		info["turn_bucket"] = (int)mm_turn_bucket_for_degrees(turn_degrees);
 		const float turn_magnitude = turn_degrees < 0.0f ? -turn_degrees : turn_degrees;
 		info["turn_in_place_needed"] = current_speed < 0.15f && turn_magnitude > 30.0f;
@@ -1084,7 +1123,6 @@ Dictionary MotionMatchingController::get_debug_cost_breakdown() const {
 		"pose_velocity",
 		"root_velocity",
 		"extra",
-		"yaw_rate",
 	};
 
 	float total = 0.0f;
@@ -1271,6 +1309,7 @@ void MotionMatchingController::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("update", "delta"), &MotionMatchingController::update);
 	ClassDB::bind_method(D_METHOD("force_search"), &MotionMatchingController::force_search);
 	ClassDB::bind_method(D_METHOD("rebuild"), &MotionMatchingController::rebuild);
+	ClassDB::bind_method(D_METHOD("play_by_tag", "tag"), &MotionMatchingController::play_by_tag);
 
 	ClassDB::bind_method(D_METHOD("get_current_clip"), &MotionMatchingController::get_current_clip);
 	ClassDB::bind_method(D_METHOD("get_current_time"), &MotionMatchingController::get_current_time);
