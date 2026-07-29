@@ -57,13 +57,16 @@ private:
 	// resource is opened, instead of living only in the dock's own LineEdit.
 	NodePath _skeleton_path;
 
-	// Optional manual overrides for just these two roles. Left empty, the
-	// extractor's auto-detect decides them like every other role; set by
-	// hand here (from the Database dock), MMSkeletonProfile locks them and
-	// keeps them through every future auto-detect pass -- these are the only
-	// two roles that commonly need a nudge (foot IK/contacts are sensitive to
-	// exactly which bone is "the foot"), so this stays two fields instead of
-	// the full 22-role manual mapping that used to live in the dock.
+	// Optional manual overrides for these roles. Left empty, the extractor's
+	// auto-detect decides them like every other role; set by hand here (from
+	// the Database dock), MMSkeletonProfile locks them and keeps them through
+	// every future auto-detect pass. Pelvis is included alongside the feet
+	// because those three roles are the minimum the pipeline actually needs
+	// (see MMSkeletonProfile::get_default_pose_bones()) -- setting all three
+	// by hand lets a build proceed even on a rig whose overall shape trips up
+	// the auto-detect heuristics, instead of the full 22-role manual mapping
+	// that used to live in the dock.
+	String _pelvis_override;
 	String _left_foot_override;
 	String _right_foot_override;
 
@@ -116,6 +119,7 @@ public:
 	Ref<MMCostFunction> get_cost_function() const { return _cost_function; }
 
 	MM_ACCESSORS(NodePath, skeleton_path)
+	MM_ACCESSORS(String, pelvis_override)
 	MM_ACCESSORS(String, left_foot_override)
 	MM_ACCESSORS(String, right_foot_override)
 
