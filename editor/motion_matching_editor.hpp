@@ -20,6 +20,7 @@
 #include <godot_cpp/classes/editor_resource_picker.hpp>
 #include <godot_cpp/classes/h_box_container.hpp>
 #include <godot_cpp/classes/h_slider.hpp>
+#include <godot_cpp/classes/h_split_container.hpp>
 #include <godot_cpp/classes/label.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/option_button.hpp>
