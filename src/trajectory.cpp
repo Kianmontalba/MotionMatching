@@ -233,10 +233,6 @@ void MMTrajectory::write_features(float *r_query, const Ref<MMFeatureSchema> &p_
 		r_query[direction_offset + i * 2 + 0] = local_direction.x;
 		r_query[direction_offset + i * 2 + 1] = local_direction.z;
 	}
-
-	if (p_schema->get_include_yaw_rate()) {
-		r_query[p_schema->get_yaw_rate_offset()] = _yaw_rate;
-	}
 }
 
 PackedVector3Array MMTrajectory::get_debug_points() const {
