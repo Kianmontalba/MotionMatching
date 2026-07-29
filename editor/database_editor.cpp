@@ -871,22 +871,24 @@ void MMDatabaseEditor::_on_build_pressed() {
 
 	_database = extractor->build_database(skeleton, _library, _clip_settings);
 	_progress->set_value(1.0);
-
+	
 	if (_database.is_null()) {
-		const String report = extractor->get_last_prepare_report();
-		if (!report.is_empty()) {
-			_log_line("Build failed: " + report, Color(1, 0.5f, 0.4f));
-			_log_line(
-					"If auto-detect keeps failing on this rig, set Pelvis / Left foot bone / "
-					"Right foot bone (override) above by hand -- those three are the only roles "
-					"the build actually needs, and setting all three lets it proceed.",
-					Color(1, 0.85f, 0.4f));
-		} else {
-			_log_line("Build failed. Check the Output/Debugger panel for details.",
-					Color(1, 0.5f, 0.4f));
-		}
-		return;
+	const String report = extractor->get_last_prepare_report();
+	if (!report.is_empty()) {
+		_log_line("Build failed: " + report, Color(1, 0.5f, 0.4f));
+		_log_line(
+				"Auto-detect needs to resolve every role on this skeleton before Build can "
+				"run -- setting Pelvis / Left foot bone / Right foot bone (override) above "
+				"only helps if one of those three was specifically what tripped detection. "
+				"If the whole rig shape is the problem, this skeleton needs a full manual "
+				"bone mapping, which the dock does not expose yet.",
+				Color(1, 0.85f, 0.4f));
+	} else {
+		_log_line("Build failed. Check the Output/Debugger panel for details.",
+				Color(1, 0.5f, 0.4f));
 	}
+	return;
+}
 
 	// build_database() always returns a brand new object -- it never edits
 	// one in place -- so the name typed into "Database name" above has to be
