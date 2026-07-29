@@ -1,1108 +1,1018 @@
-#ifdef TOOLS_ENABLED
+#include "feature_extractor.hpp"
 
-#include "motion_matching_editor.hpp"
-#include "animation_library.hpp"
-
-#include <godot_cpp/classes/editor_interface.hpp>
-#include <godot_cpp/classes/h_box_container.hpp>
-#include <godot_cpp/classes/resource_loader.hpp>
-#include <godot_cpp/classes/resource_saver.hpp>
+#include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
-#include <godot_cpp/classes/scene_tree.hpp>
+
+#include <atomic>
+#include <vector>
 
 using namespace godot;
 
-// ---------------------------------------------------------------------------
-// MMNodePathField
-// ---------------------------------------------------------------------------
-
-bool MMNodePathField::_can_drop_data(const Vector2 &p_point, const Variant &p_data) const {
-	if (p_data.get_type() != Variant::DICTIONARY) {
-		return false;
-	}
-	const Dictionary data = p_data;
-	// This is the same drag payload shape the Scene dock hands to every
-	// built-in NodePath field in the Inspector -- matching it means this
-	// field accepts a drop exactly where a person would already expect one
-	// to work.
-	return String(data.get("type", "")) == "nodes";
-}
-
-void MMNodePathField::_drop_data(const Vector2 &p_point, const Variant &p_data) {
-	const Dictionary data = p_data;
-	const Array dropped = data.get("nodes", Array());
-	if (dropped.is_empty()) {
-		return;
-	}
-
-	Node *scene_root = EditorInterface::get_singleton()->get_edited_scene_root();
-	if (scene_root == nullptr || scene_root->get_tree() == nullptr) {
-		return;
-	}
-
-	// Resolved through the live SceneTree rather than string-parsed: the
-	// dropped path from the Scene dock has always been absolute in every
-	// Godot 4 release this addon targets, but going through the actual
-	// Node means a future change to that format cannot silently write a
-	// wrong path in here -- it would just fail to resolve and the drop
-	// would be quietly ignored instead.
-	Node *dropped_node = scene_root->get_tree()->get_root()->get_node_or_null(NodePath(dropped[0]));
-	if (dropped_node == nullptr) {
-		// Fall back to treating the payload as already relative to the
-		// edited scene root, in case that assumption above ever changes.
-		dropped_node = scene_root->get_node_or_null(NodePath(dropped[0]));
-	}
-	if (dropped_node == nullptr) {
-		return;
-	}
-
-	// Always re-expressed relative to the edited scene root, not copied
-	// verbatim -- this is what _resolve_skeleton() expects, and what keeps
-	// the path correct if the scene is ever renamed or moved.
-	set_text(String(scene_root->get_path_to(dropped_node)));
-	grab_focus();
-	emit_signal("text_changed", get_text());
-	emit_signal("text_submitted", get_text());
-}
-
-void MMNodePathField::_bind_methods() {
-}
-
-// Wraps one field as its own small labeled box (small label on top, the
-// control right under it) -- this is what lets a narrow left column read as
-// a stack of compact boxes instead of one full-width row per field.
-PanelContainer *MMDatabaseEditor::_add_compact_box(VBoxContainer *p_parent, const String &p_label, Control *p_control) {
-	PanelContainer *box = memnew(PanelContainer);
-	VBoxContainer *inner = memnew(VBoxContainer);
-	inner->add_theme_constant_override("separation", 2);
-	box->add_child(inner);
-
-	Label *label = memnew(Label);
-	label->set_text(p_label);
-	label->add_theme_font_size_override("font_size", 11);
-	inner->add_child(label);
-
-	p_control->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	inner->add_child(p_control);
-
-	p_parent->add_child(box);
-	return box;
-}
-
-MMDatabaseEditor::MMDatabaseEditor() {
-	add_theme_constant_override("separation", 4);
-
-	_split = memnew(HSplitContainer);
-	_split->set_v_size_flags(Control::SIZE_EXPAND_FILL);
-	_split->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	add_child(_split);
-
-	// ---- Left column: every setting, one compact box each, its own scroll.
-	_left_root = memnew(VBoxContainer);
-	_left_root->set_custom_minimum_size(Vector2(300, 0));
-	_left_root->set_v_size_flags(Control::SIZE_EXPAND_FILL);
-	_split->add_child(_left_root);
-
-	_left_scroll = memnew(ScrollContainer);
-	_left_scroll->set_v_size_flags(Control::SIZE_EXPAND_FILL);
-	_left_scroll->set_horizontal_scroll_mode(ScrollContainer::SCROLL_MODE_DISABLED);
-	_left_root->add_child(_left_scroll);
-
-	_left_stack = memnew(VBoxContainer);
-	_left_stack->add_theme_constant_override("separation", 4);
-	_left_stack->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	_left_scroll->add_child(_left_stack);
-
-	_resource_picker = memnew(EditorResourcePicker);
-	_resource_picker->set_base_type("MotionMatchingResource");
-	_add_compact_box(_left_stack, "Motion Matching Resource", _resource_picker);
-
-	_use_external_skeleton = memnew(CheckButton);
-	_use_external_skeleton->set_text("Use external skeleton");
-	_use_external_skeleton->set_tooltip_text(
-			"Off: the first Skeleton3D in the open scene is found automatically.\n"
-			"On: point at a Skeleton3D the dock cannot guess, the same way "
-			"BoneAttachment3D's external skeleton works.");
-	_add_compact_box(_left_stack, "Skeleton source", _use_external_skeleton);
-
-	_skeleton_path = memnew(MMNodePathField);
-	_skeleton_path->set_text("%GeneralSkeleton");
-	_skeleton_path->set_placeholder("Type a path, drag a node in from the Scene dock, or use Pick...");
-	_skeleton_path->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-
-	_skeleton_picker_button = memnew(Button);
-	_skeleton_picker_button->set_text("Pick...");
-	_skeleton_picker_button->set_tooltip_text("Browse every Skeleton3D node in the current scene");
-
-	HBoxContainer *skeleton_row = memnew(HBoxContainer);
-	skeleton_row->add_child(_skeleton_path);
-	skeleton_row->add_child(_skeleton_picker_button);
-	_skeleton_box = _add_compact_box(_left_stack, "Skeleton node path", skeleton_row);
-	// Internal is the default, so the path box starts hidden -- the dock only
-	// ever shows a field there is actually a reason to fill in.
-	_skeleton_box->set_visible(false);
-
-	_skeleton_popup = memnew(PopupMenu);
-	add_child(_skeleton_popup);
-
-	// Backed by the resource above, not a typed-in path: picking (or
-	// dropping) a library here writes it straight onto the Motion Matching
-	// Resource and saves that resource to disk immediately, so it survives
-	// closing the dock, switching scenes, or an addon reload -- none of
-	// which this control's own state would otherwise survive.
-	_library_picker = memnew(EditorResourcePicker);
-	_library_picker->set_base_type("AnimationLibrary");
-	_add_compact_box(_left_stack, "Animation library", _library_picker);
-
-	_box_option = memnew(OptionButton);
-	_box_option->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	_add_box_button = memnew(Button);
-	_add_box_button->set_text("+ Add Box");
-	_add_box_button->set_tooltip_text("New animation set, e.g. \"Normal Rifle\", \"Pistol\", \"Zombie\"");
-	HBoxContainer *box_row = memnew(HBoxContainer);
-	box_row->add_child(_box_option);
-	box_row->add_child(_add_box_button);
-	_add_compact_box(_left_stack, "Animation set (box)", box_row);
-
-	_box_name_edit = memnew(LineEdit);
-	_box_name_edit->set_placeholder("Name this set, e.g. Pistol");
-	_add_compact_box(_left_stack, "Box name", _box_name_edit);
-
-	_database_option = memnew(OptionButton);
-	_database_option->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	_add_database_button = memnew(Button);
-	_add_database_button->set_text("+ Add Database");
-	_add_database_button->set_tooltip_text("New database inside this box, e.g. \"Walk\", \"Sprint\", \"Jump\"");
-	HBoxContainer *database_row = memnew(HBoxContainer);
-	database_row->add_child(_database_option);
-	database_row->add_child(_add_database_button);
-	_add_compact_box(_left_stack, "Database", database_row);
-
-	_database_name_edit = memnew(LineEdit);
-	_database_name_edit->set_placeholder("Name this database, e.g. Walk");
-	_add_compact_box(_left_stack, "Database name", _database_name_edit);
-
-	_loop_toggle = memnew(CheckButton);
-	_loop_toggle->set_text("Loop every clip in this database");
-	_add_compact_box(_left_stack, "Toggle loop (all clips)", _loop_toggle);
-
-	// Integer-only by construction -- a SpinBox has no text field to type
-	// letters into, unlike the Box/Database name LineEdits above it, so this
-	// can never hold anything but a whole number in range.
-	_database_tag = memnew(SpinBox);
-	_database_tag->set_min(1);
-	_database_tag->set_max(100);
-	_database_tag->set_step(1);
-	_database_tag->set_value(1);
-	_database_tag->set_tooltip_text(
-			"Script-facing code name for this database. Several databases can share the "
-			"same tag (e.g. Stand/Walk/Run/Sprint all set to 1) -- play_by_tag(1) on the "
-			"controller picks whichever one best fits the current speed.");
-	_add_compact_box(_left_stack, "Database tag (script code name)", _database_tag);
-
-	// Collapsed by default: sample rate, yaw offset and the two foot bone
-	// overrides are set once per box/database and rarely touched again, so
-	// hiding them behind one toggle -- inside the same left scroll -- is what
-	// keeps this "all components" section from ever pushing the dock taller.
-	// ASCII-only text: the previous unicode arrow glyph (U+25B8) rendered as
-	// mojibake in some editor builds depending on how the .cpp source file's
-	// encoding got read.
-	_advanced_toggle = memnew(Button);
-	_advanced_toggle->set_text("[+] All components (sample rate, yaw offset, foot overrides)");
-	_advanced_toggle->set_toggle_mode(true);
-	_left_stack->add_child(_advanced_toggle);
-
-	_advanced_section = memnew(VBoxContainer);
-	_advanced_section->set_visible(false);
-	_left_stack->add_child(_advanced_section);
-
-	_sample_rate = memnew(SpinBox);
-	_sample_rate->set_min(10);
-	_sample_rate->set_max(120);
-	_sample_rate->set_value(30);
-	_add_compact_box(_advanced_section, "Sample rate (Hz)", _sample_rate);
-
-	_root_yaw_offset = memnew(SpinBox);
-	_root_yaw_offset->set_min(-180);
-	_root_yaw_offset->set_max(180);
-	_root_yaw_offset->set_step(1);
-	_root_yaw_offset->set_value(0);
-	_add_compact_box(_advanced_section, "Root yaw offset (degrees)", _root_yaw_offset);
-
-	_left_foot_override = memnew(OptionButton);
-	_left_foot_override->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	_add_compact_box(_advanced_section, "Left foot bone (override)", _left_foot_override);
-
-	_right_foot_override = memnew(OptionButton);
-	_right_foot_override->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	_add_compact_box(_advanced_section, "Right foot bone (override)", _right_foot_override);
-
-	// Starts as auto-detect only. Filled the moment a skeleton resolves.
-	_refresh_bone_pickers(nullptr);
-
-	// Any future field/box gets added here, inside _left_stack (or inside
-	// _advanced_section) -- it only grows the scroll content, never the dock.
-
-	// ---- Pinned below the left scroll, always visible regardless of how
-	// long the settings stack above grows: the primary actions, progress,
-	// and the log/debug readout.
-	HBoxContainer *buttons = memnew(HBoxContainer);
-	_scan_button = memnew(Button);
-	_scan_button->set_text("Scan library");
-	buttons->add_child(_scan_button);
-
-	_validate_button = memnew(Button);
-	_validate_button->set_text("Validate");
-	buttons->add_child(_validate_button);
-
-	_build_button = memnew(Button);
-	_build_button->set_text("Build database");
-	buttons->add_child(_build_button);
-
-	_save_button = memnew(Button);
-	_save_button->set_text("Save");
-	buttons->add_child(_save_button);
-	_left_root->add_child(buttons);
-
-	_progress = memnew(ProgressBar);
-	_progress->set_max(1.0);
-	_left_root->add_child(_progress);
-
-	_log = memnew(RichTextLabel);
-	_log->set_custom_minimum_size(Vector2(0, 90));
-	_left_root->add_child(_log);
-
-	// ---- Right column: the clip table gets the rest of the width, and
-	// scrolls on its own (Tree already scrolls internally once its content
-	// overflows -- wrapping it in a second ScrollContainer would just fight
-	// that native scrollbar, so it is left to fill its column directly).
-	_right_root = memnew(VBoxContainer);
-	_right_root->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	_right_root->set_v_size_flags(Control::SIZE_EXPAND_FILL);
-	_split->add_child(_right_root);
-
-	_clip_table = memnew(Tree);
-	_clip_table->set_columns(5);
-	_clip_table->set_column_titles_visible(true);
-	_clip_table->set_column_title(0, "Group");
-	_clip_table->set_column_title(1, "Clip");
-	_clip_table->set_column_title(2, "Category");
-	_clip_table->set_column_title(3, "Tags");
-	_clip_table->set_column_title(4, "Length");
-	_clip_table->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	_clip_table->set_v_size_flags(Control::SIZE_EXPAND_FILL);
-	_right_root->add_child(_clip_table);
-
-	// Right column gets most of the width; left stays a fixed compact strip.
-	_split->set_split_offset(300);
-}
-
-void MMDatabaseEditor::_ready() {
-	_resource_picker->connect("resource_changed", Callable(this, "_on_resource_picked"));
-	_library_picker->connect("resource_changed", Callable(this, "_on_library_picked"));
-	_skeleton_path->connect("text_changed", Callable(this, "_on_skeleton_path_changed"));
-	_skeleton_picker_button->connect("pressed", Callable(this, "_on_skeleton_picker_pressed"));
-	_skeleton_popup->connect("index_pressed", Callable(this, "_on_skeleton_popup_selected"));
-	_use_external_skeleton->connect("toggled", Callable(this, "_on_use_external_skeleton_toggled"));
-	_left_foot_override->connect("item_selected", Callable(this, "_on_left_foot_override_changed"));
-	_right_foot_override->connect("item_selected", Callable(this, "_on_right_foot_override_changed"));
-	_box_option->connect("item_selected", Callable(this, "_on_box_selected"));
-	_add_box_button->connect("pressed", Callable(this, "_on_add_box_pressed"));
-	_box_name_edit->connect("text_changed", Callable(this, "_on_box_name_changed"));
-	_database_option->connect("item_selected", Callable(this, "_on_database_selected"));
-	_add_database_button->connect("pressed", Callable(this, "_on_add_database_pressed"));
-	_database_name_edit->connect("text_changed", Callable(this, "_on_database_name_changed"));
-	_loop_toggle->connect("toggled", Callable(this, "_on_loop_toggle_toggled"));
-	_database_tag->connect("value_changed", Callable(this, "_on_database_tag_changed"));
-	_advanced_toggle->connect("pressed", Callable(this, "_on_advanced_toggle_pressed"));
-	_scan_button->connect("pressed", Callable(this, "_on_scan_pressed"));
-	_build_button->connect("pressed", Callable(this, "_on_build_pressed"));
-	_save_button->connect("pressed", Callable(this, "_on_save_pressed"));
-	_validate_button->connect("pressed", Callable(this, "_on_validate_pressed"));
-	_log_line("Ready. Assign a Motion Matching Resource, point at a Skeleton3D, then scan a library.");
-}
-
-void MMDatabaseEditor::_log_line(const String &p_text, const Color &p_color) {
-	if (_log == nullptr) {
-		return;
-	}
-	_log->push_color(p_color);
-	_log->add_text(p_text + String("\n"));
-	_log->pop();
-}
-
-Skeleton3D *MMDatabaseEditor::_find_first_skeleton(Node *p_node) const {
-	if (p_node == nullptr) {
-		return nullptr;
-	}
-	Skeleton3D *self = Object::cast_to<Skeleton3D>(p_node);
-	if (self != nullptr) {
-		return self;
-	}
-	for (int i = 0; i < p_node->get_child_count(); i++) {
-		Skeleton3D *found = _find_first_skeleton(p_node->get_child(i));
-		if (found != nullptr) {
-			return found;
-		}
-	}
-	return nullptr;
-}
-
-Skeleton3D *MMDatabaseEditor::_resolve_skeleton(bool p_quiet) {
-	Node *root = EditorInterface::get_singleton()->get_edited_scene_root();
-	if (root == nullptr) {
-		if (!p_quiet) {
-			_log_line("No scene is open.", Color(1, 0.5f, 0.4f));
-		}
-		return nullptr;
-	}
-
-	// Internal mode: no path is involved at all, so a skeleton sitting
-	// anywhere in the scene still resolves -- including one that is not a
-	// parent of anything this dock knows about.
-	if (!_use_external_skeleton->is_pressed()) {
-		Skeleton3D *found = _find_first_skeleton(root);
-		if (found == nullptr && !p_quiet) {
-			_log_line("No Skeleton3D found in the open scene. Switch on "
-					  "\"Use external skeleton\" to point at one by path.",
-					Color(1, 0.5f, 0.4f));
-		}
-		return found;
-	}
-
-	Node *node = root->get_node_or_null(NodePath(_skeleton_path->get_text()));
-	Skeleton3D *skeleton = Object::cast_to<Skeleton3D>(node);
-	if (skeleton == nullptr && !p_quiet) {
-		_log_line("Could not resolve a Skeleton3D at that path.", Color(1, 0.5f, 0.4f));
-	}
-	return skeleton;
-}
-
-void MMDatabaseEditor::_on_use_external_skeleton_toggled(bool p_pressed) {
-	_skeleton_box->set_visible(p_pressed);
-
-	// The path doubles as the stored mode: cleared means internal. Written
-	// through the existing handler so the save-to-disk path stays in one
-	// place instead of being duplicated here.
-	if (!p_pressed) {
-		_on_skeleton_path_changed(String());
+// Projects a transform onto the ground plane, keeping only its yaw. Used when
+// a clip has no dedicated root track and the hips have to stand in for one.
+static Transform3D mm_project_yaw(const Transform3D &p_transform) {
+	Vector3 forward = -p_transform.basis.get_column(2);
+	forward.y = 0.0f;
+	if (forward.length_squared() < 0.000001f) {
+		forward = Vector3(0, 0, -1);
 	} else {
-		_on_skeleton_path_changed(_skeleton_path->get_text());
+		forward.normalize();
 	}
-	_update_bone_pickers();
+	Basis basis = Basis::looking_at(forward, Vector3(0, 1, 0));
+	return Transform3D(basis, Vector3(p_transform.origin.x, 0.0f, p_transform.origin.z));
 }
 
-void MMDatabaseEditor::_refresh_bone_pickers(Skeleton3D *p_skeleton) {
-	// Remembered before clearing so a re-resolve onto a different rig keeps
-	// the user's choice whenever that same bone name still exists.
-	const String left = _mm_resource.is_valid() ? _mm_resource->get_left_foot_override() : String();
-	const String right = _mm_resource.is_valid() ? _mm_resource->get_right_foot_override() : String();
+// ---------------------------------------------------------------------------
+// MMPoseSampler
+// ---------------------------------------------------------------------------
 
-	_left_foot_override->clear();
-	_right_foot_override->clear();
-	_left_foot_override->add_item("(auto-detect)");
-	_right_foot_override->add_item("(auto-detect)");
+bool MMPoseSampler::bind(Skeleton3D *p_skeleton, const Ref<Animation> &p_animation,
+		const String &p_root_bone, const String &p_pelvis_bone) {
+	ERR_FAIL_NULL_V(p_skeleton, false);
+	ERR_FAIL_COND_V(p_animation.is_null(), false);
 
-	if (p_skeleton != nullptr) {
-		const int count = p_skeleton->get_bone_count();
-		for (int i = 0; i < count; i++) {
-			const String bone = p_skeleton->get_bone_name(i);
-			_left_foot_override->add_item(bone);
-			_right_foot_override->add_item(bone);
-		}
-	}
+	_skeleton = p_skeleton;
+	_animation = p_animation;
+	_bone_count = p_skeleton->get_bone_count();
 
-	_select_bone_option(_left_foot_override, left);
-	_select_bone_option(_right_foot_override, right);
+	_tracks.resize(_bone_count);
+	_parents.resize(_bone_count);
+	_rest.resize(_bone_count);
+	_local.resize(_bone_count);
+	_model.resize(_bone_count);
 
-	// Nothing to choose from until a skeleton resolves, so the dropdowns say
-	// so instead of silently offering a single useless entry.
-	const bool has_bones = p_skeleton != nullptr && p_skeleton->get_bone_count() > 0;
-	_left_foot_override->set_disabled(!has_bones);
-	_right_foot_override->set_disabled(!has_bones);
-}
-
-void MMDatabaseEditor::_select_bone_option(OptionButton *p_option, const String &p_name) {
-	if (p_name.is_empty()) {
-		p_option->select(0);
-		return;
-	}
-	for (int i = 1; i < p_option->get_item_count(); i++) {
-		if (p_option->get_item_text(i) == p_name) {
-			p_option->select(i);
-			return;
-		}
-	}
-	// The stored bone is not on this skeleton -- fall back to auto-detect
-	// rather than showing a selection that would not survive a build.
-	p_option->select(0);
-}
-
-String MMDatabaseEditor::_selected_bone(OptionButton *p_option) const {
-	const int index = p_option->get_selected();
-	// Index 0 is the auto-detect entry and -1 means nothing is selected --
-	// both mean "no manual override, leave this role to detection".
-	return index <= 0 ? String() : p_option->get_item_text(index);
-}
-
-void MMDatabaseEditor::_update_bone_pickers() {
-	_refresh_bone_pickers(_resolve_skeleton(true));
-}
-
-String MMDatabaseEditor::_group_of(const String &p_name) {
-	const int slash = p_name.rfind("/");
-	return slash < 0 ? String() : p_name.substr(0, slash);
-}
-
-String MMDatabaseEditor::_clip_of(const String &p_name) {
-	const int slash = p_name.rfind("/");
-	return slash < 0 ? p_name : p_name.substr(slash + 1);
-}
-
-void MMDatabaseEditor::_on_resource_picked(const Ref<Resource> &p_resource) {
-	_mm_resource = p_resource;
-	if (_mm_resource.is_null()) {
-		_log_line("Motion Matching Resource cleared.", Color(1, 0.85f, 0.4f));
-		return;
+	HashMap<String, int> bone_lookup;
+	for (int i = 0; i < _bone_count; i++) {
+		_tracks.write[i] = BoneTracks();
+		_parents.write[i] = p_skeleton->get_bone_parent(i);
+		_rest.write[i] = p_skeleton->get_bone_rest(i);
+		bone_lookup[p_skeleton->get_bone_name(i)] = i;
 	}
 
-	// Load whatever this resource already has assigned, rather than leaving
-	// the dock showing something unrelated to the resource just picked.
-	_library_picker->set_edited_resource(_mm_resource->get_animation_library());
-	_library = _mm_resource->get_animation_library();
-	_extra_database = _mm_resource->get_database();
-	_schema = _mm_resource->get_schema();
-	_refresh_box_options();
-	// A stored path means this resource was set up in external mode; an empty
-	// one means internal. set_pressed_no_signal() so restoring the mode does
-	// not immediately write it back and re-save the resource.
-	const bool external = !_mm_resource->get_skeleton_path().is_empty();
-	_use_external_skeleton->set_pressed_no_signal(external);
-	_skeleton_box->set_visible(external);
-	if (external) {
-		_skeleton_path->set_text(String(_mm_resource->get_skeleton_path()));
-	}
-	_update_bone_pickers();
-
-	if (_library.is_valid()) {
-		_clip_settings = MMAnimationLibraryTools::auto_tag_library(_library);
-		_populate_table();
-	} else {
-		_clip_table->clear();
-	}
-
-	_log_line("Loaded " + _mm_resource->get_path(), Color(0.5f, 1.0f, 0.6f));
-}
-
-void MMDatabaseEditor::_on_library_picked(const Ref<Resource> &p_resource) {
-	_library = p_resource;
-
-	if (_mm_resource.is_valid()) {
-		// Persisted immediately, not just held in the dock's own memory --
-		// this is what makes the pick survive closing the dock or an addon
-		// reload, unlike a typed-in path that lived only in a LineEdit.
-		_mm_resource->set_animation_library(_library);
-		if (!_mm_resource->get_path().is_empty()) {
-			const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-			if (error != OK) {
-				_log_line(vformat("Could not save the library pick back to %s (error %d).",
-								_mm_resource->get_path(), (int)error),
-						Color(1, 0.5f, 0.4f));
-			}
-		} else {
-			_log_line(
-					"Motion Matching Resource has not been saved to disk yet, so this pick will "
-					"only last for the current editor session. Save it once from the Inspector "
-					"and the pick will start persisting automatically.",
-					Color(1, 0.85f, 0.4f));
-		}
-	}
-
-	if (_library.is_null()) {
-		_clip_table->clear();
-		return;
-	}
-
-	// Auto tagging is a starting point, not the answer. The table stays
-	// editable so a wrong guess costs one click, not a rebuild.
-	_clip_settings = MMAnimationLibraryTools::auto_tag_library(_library);
-	_populate_table();
-	_log_line(vformat("Scanned %d clips and suggested tags for each.",
-			_library->get_animation_list().size()));
-}
-
-void MMDatabaseEditor::_on_skeleton_path_changed(const String &p_text) {
-	if (_mm_resource.is_null()) {
-		return;
-	}
-	// Same persist-immediately pattern as _on_library_picked(): written onto
-	// the resource (and saved to disk, if it has one) as soon as it changes,
-	// so a dropped or typed path survives closing the dock, switching
-	// scenes, or an addon reload, instead of resetting to the placeholder.
-	_mm_resource->set_skeleton_path(NodePath(p_text));
-	_update_bone_pickers();
-	if (_mm_resource->get_path().is_empty()) {
-		return;
-	}
-	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-	if (error != OK) {
-		_log_line(vformat("Could not save the skeleton path back to %s (error %d).",
-							_mm_resource->get_path(), (int)error),
-				Color(1, 0.5f, 0.4f));
-	}
-}
-
-void MMDatabaseEditor::_on_left_foot_override_changed(int) {
-	if (_mm_resource.is_null()) {
-		return;
-	}
-	// Item 0 is the auto-detect entry, which stores an empty override and
-	// leaves the role to MMSkeletonProfile's own detection.
-	const String p_text = _selected_bone(_left_foot_override);
-	// Same persist-immediately pattern as _on_skeleton_path_changed().
-	_mm_resource->set_left_foot_override(p_text);
-	if (_mm_resource->get_path().is_empty()) {
-		return;
-	}
-	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-	if (error != OK) {
-		_log_line(vformat("Could not save the left foot override back to %s (error %d).",
-							_mm_resource->get_path(), (int)error),
-				Color(1, 0.5f, 0.4f));
-	}
-}
-
-void MMDatabaseEditor::_on_right_foot_override_changed(int) {
-	if (_mm_resource.is_null()) {
-		return;
-	}
-	const String p_text = _selected_bone(_right_foot_override);
-	_mm_resource->set_right_foot_override(p_text);
-	if (_mm_resource->get_path().is_empty()) {
-		return;
-	}
-	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-	if (error != OK) {
-		_log_line(vformat("Could not save the right foot override back to %s (error %d).",
-							_mm_resource->get_path(), (int)error),
-				Color(1, 0.5f, 0.4f));
-	}
-}
-
-void MMDatabaseEditor::_persist_extra_database() {
-	if (_mm_resource.is_null()) {
-		return;
-	}
-	// Same persist-immediately pattern as _on_skeleton_path_changed(): the
-	// whole box/database structure is written onto the resource (and saved
-	// to disk, if it has one) as soon as it changes, so adding, renaming or
-	// switching a box/database survives closing the dock -- nothing here
-	// resets like the old manual bone UI used to.
-	_mm_resource->set_database(_extra_database);
-	if (_mm_resource->get_path().is_empty()) {
-		return;
-	}
-	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-	if (error != OK) {
-		_log_line(vformat("Could not save the animation set structure back to %s (error %d).",
-							_mm_resource->get_path(), (int)error),
-				Color(1, 0.5f, 0.4f));
-	}
-}
-
-void MMDatabaseEditor::_refresh_box_options() {
-	_box_option->clear();
-	if (_extra_database.is_null()) {
-		_box_name_edit->set_text("");
-		_refresh_database_options();
-		return;
-	}
-	const int count = _extra_database->get_box_count();
-	for (int i = 0; i < count; i++) {
-		Ref<MMBoxAnimation> box = _extra_database->get_box(i);
-		const String label = (box.is_valid() && !box->get_name().is_empty()) ? box->get_name() : vformat("Box %d", i + 1);
-		_box_option->add_item(label);
-	}
-	if (count == 0) {
-		_box_name_edit->set_text("");
-		_refresh_database_options();
-		return;
-	}
-	int active = _extra_database->get_active_box_index();
-	if (active < 0 || active >= count) {
-		active = 0;
-	}
-	_box_option->select(active);
-	Ref<MMBoxAnimation> box = _extra_database->get_box(active);
-	_box_name_edit->set_text(box.is_valid() ? box->get_name() : "");
-	_refresh_database_options();
-}
-
-void MMDatabaseEditor::_refresh_database_options() {
-	_database_option->clear();
-	Ref<MMBoxAnimation> box;
-	if (_extra_database.is_valid() && _extra_database->get_box_count() > 0) {
-		int active_box = _extra_database->get_active_box_index();
-		if (active_box < 0 || active_box >= _extra_database->get_box_count()) {
-			active_box = 0;
-		}
-		box = _extra_database->get_box(active_box);
-	}
-	if (box.is_null()) {
-		_database = Ref<MotionMatchingDatabase>();
-		_database_name_edit->set_text("");
-		_database_tag->set_value(1);
-		return;
-	}
-	const int count = box->get_database_count();
-	for (int i = 0; i < count; i++) {
-		Ref<MotionMatchingDatabase> database = box->get_database(i);
-		const String label = (database.is_valid() && !database->get_name().is_empty()) ? database->get_name() : vformat("Database %d", i + 1);
-		_database_option->add_item(label);
-	}
-	if (count == 0) {
-		_database = Ref<MotionMatchingDatabase>();
-		_database_name_edit->set_text("");
-		_database_tag->set_value(1);
-		return;
-	}
-	int active = _extra_database->get_active_database_index();
-	if (active < 0 || active >= count) {
-		active = 0;
-	}
-	_database_option->select(active);
-	_database = box->get_database(active);
-	_database_name_edit->set_text(_database.is_valid() ? _database->get_name() : "");
-	// Tag defaults to 1 for a brand new (never-built) database, same as the
-	// SpinBox's own default, rather than 0 or -1 -- so a database left
-	// untouched still matches play_by_tag(1) instead of silently matching
-	// nothing.
-	_database_tag->set_value(_database.is_valid() && _database->get_tag() > 0 ? _database->get_tag() : 1);
-}
-
-void MMDatabaseEditor::_on_box_selected(int p_index) {
-	if (_extra_database.is_null()) {
-		return;
-	}
-	_extra_database->set_active_box_index(p_index);
-	_extra_database->set_active_database_index(0);
-	_persist_extra_database();
-	Ref<MMBoxAnimation> box = _extra_database->get_box(p_index);
-	_box_name_edit->set_text(box.is_valid() ? box->get_name() : "");
-	_refresh_database_options();
-}
-
-void MMDatabaseEditor::_on_add_box_pressed() {
-	if (_mm_resource.is_null()) {
-		_log_line("Assign a Motion Matching Resource above first.", Color(1, 0.5f, 0.4f));
-		return;
-	}
-	if (_extra_database.is_null()) {
-		_extra_database.instantiate();
-	}
-	// Unlimited -- this just keeps appending.
-	_extra_database->add_box("New Box");
-	_extra_database->set_active_box_index(_extra_database->get_box_count() - 1);
-	_extra_database->set_active_database_index(0);
-	_persist_extra_database();
-	_refresh_box_options();
-}
-
-void MMDatabaseEditor::_on_box_name_changed(const String &p_text) {
-	if (_extra_database.is_null()) {
-		return;
-	}
-	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box_index());
-	if (box.is_null()) {
-		return;
-	}
-	box->set_name(p_text);
-	_persist_extra_database();
-	// Keeps the dropdown's own label in sync without a full rebuild.
-	_box_option->set_item_text(_extra_database->get_active_box_index(), p_text.is_empty() ? vformat("Box %d", _extra_database->get_active_box_index() + 1) : p_text);
-}
-
-void MMDatabaseEditor::_on_database_selected(int p_index) {
-	if (_extra_database.is_null()) {
-		return;
-	}
-	_extra_database->set_active_database_index(p_index);
-	_persist_extra_database();
-	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box_index());
-	_database = box.is_valid() ? box->get_database(p_index) : Ref<MotionMatchingDatabase>();
-	_database_name_edit->set_text(_database.is_valid() ? _database->get_name() : "");
-}
-
-void MMDatabaseEditor::_on_add_database_pressed() {
-	if (_extra_database.is_null() || _extra_database->get_box_count() == 0) {
-		_log_line("Add an animation set (box) first -- use \"+ Add Box\" above.", Color(1, 0.85f, 0.4f));
-		return;
-	}
-	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box_index());
-	if (box.is_null()) {
-		return;
-	}
-	// Unlimited -- this just keeps appending, same as add_box().
-	box->add_database("New Database");
-	_extra_database->set_active_database_index(box->get_database_count() - 1);
-	_persist_extra_database();
-	_refresh_database_options();
-}
-
-void MMDatabaseEditor::_on_database_name_changed(const String &p_text) {
-	if (_database.is_null()) {
-		return;
-	}
-	_database->set_name(p_text);
-	_persist_extra_database();
-	if (_extra_database.is_valid()) {
-		_database_option->set_item_text(_extra_database->get_active_database_index(),
-				p_text.is_empty() ? vformat("Database %d", _extra_database->get_active_database_index() + 1) : p_text);
-	}
-}
-
-void MMDatabaseEditor::_on_loop_toggle_toggled(bool p_pressed) {
-	if (_database.is_null()) {
-		_log_line("Pick or build a database first.", Color(1, 0.85f, 0.4f));
-		_loop_toggle->set_pressed(false);
-		return;
-	}
-	// Handled entirely inside MotionMatchingDatabase -- it walks its own
-	// MMAnimationEntry list, this dock never touches entries directly.
-	_database->set_all_loop(p_pressed);
-	_log_line(vformat("Set loop = %s for all %d clip(s) in \"%s\".", p_pressed ? "on" : "off",
-					  _database->get_animation_count(), _database->get_name()),
-			Color(0.5f, 1.0f, 0.6f));
-}
-
-void MMDatabaseEditor::_on_database_tag_changed(double p_value) {
-	if (_database.is_null()) {
-		// Not an error -- happens while a box/database is being picked but
-		// nothing has been built yet. The value is picked up from the
-		// SpinBox directly at build time (see _on_build_pressed()) instead.
-		return;
-	}
-	_database->set_tag((int)p_value);
-	_persist_extra_database();
-}
-
-void MMDatabaseEditor::_on_advanced_toggle_pressed() {
-	const bool expanded = _advanced_toggle->is_pressed();
-	_advanced_section->set_visible(expanded);
-	_advanced_toggle->set_text(
-			(expanded ? String("[-] ") : String("[+] ")) +
-			"All components (sample rate, yaw offset, foot overrides)");
-}
-
-void MMDatabaseEditor::_on_scan_pressed() {
-	// Re-reads whatever is currently assigned rather than a remembered path,
-	// so pressing Scan after e.g. calling refresh_all() on an
-	// MMAnimationLibrary picks up files that were added or removed since the
-	// library was first picked.
-	_on_library_picked(_library_picker->get_edited_resource());
-}
-
-void MMDatabaseEditor::_populate_table() {
-	_clip_table->clear();
-	if (_library.is_null()) {
-		return;
-	}
-
-	TreeItem *root = _clip_table->create_item();
-	_clip_table->set_hide_root(true);
-
-	const PackedStringArray names = _library->get_animation_list();
-	static const char *category_names[] = { "Locomotion", "Airborne", "Traversal", "Combat",
-		"Interaction", "Custom" };
-
-	// When the names carry no prefix of their own, every clip in this library
-	// shares one group: the library itself. That keeps the column meaningful
-	// for the common single-library setup instead of showing a blank column.
-	const String library_group = _library->get_path().is_empty()
-			? String("Ungrouped")
-			: _library->get_path().get_file().get_basename();
-
-	for (int i = 0; i < names.size(); i++) {
-		Ref<Animation> animation = _library->get_animation(names[i]);
-		const Dictionary settings = _clip_settings.get(names[i], Dictionary());
-		const int category = settings.get("category", 0);
-		const int tags = settings.get("tags", 0);
-
-		const String group = _group_of(names[i]);
-
-		TreeItem *item = _clip_table->create_item(root);
-		// The full library key lives in metadata, not in a column: the visible
-		// text is split across Group and Clip, so _on_clip_edited() would have
-		// no way to rebuild it from what is displayed.
-		item->set_metadata(0, names[i]);
-		item->set_text(0, group.is_empty() ? library_group : group);
-		item->set_text(1, _clip_of(names[i]));
-		item->set_text(2, category >= 0 && category < MM_CATEGORY_MAX ? category_names[category] : "?");
-		item->set_text(3, String::num_int64(tags));
-		item->set_text(4, animation.is_valid() ? vformat("%.2fs", animation->get_length()) : "-");
-		item->set_editable(3, true);
-	}
-}
-
-void MMDatabaseEditor::_collect_skeletons(Node *p_node, Node *p_scene_root) {
-	if (Object::cast_to<Skeleton3D>(p_node) != nullptr) {
-		// Stored relative to the scene root, same convention _resolve_skeleton()
-		// and the drag-and-drop path already use -- so picking one here writes
-		// exactly the same kind of path a drop or a hand-typed one would.
-		_skeleton_candidates.push_back(String(p_scene_root->get_path_to(p_node)));
-	}
-	for (int i = 0; i < p_node->get_child_count(); i++) {
-		_collect_skeletons(p_node->get_child(i), p_scene_root);
-	}
-}
-
-void MMDatabaseEditor::_on_skeleton_picker_pressed() {
-	Node *scene_root = EditorInterface::get_singleton()->get_edited_scene_root();
-	if (scene_root == nullptr) {
-		_log_line("No scene is open.", Color(1, 0.5f, 0.4f));
-		return;
-	}
-
-	_skeleton_candidates.clear();
-	_collect_skeletons(scene_root, scene_root);
-
-	if (_skeleton_candidates.is_empty()) {
-		_log_line("No Skeleton3D node found in the current scene.", Color(1, 0.85f, 0.4f));
-		return;
-	}
-
-	_skeleton_popup->clear();
-	for (int i = 0; i < _skeleton_candidates.size(); i++) {
-		_skeleton_popup->add_item(_skeleton_candidates[i]);
-	}
-
-	// Dropped right under the button, the same place any other editor popup
-	// (like an OptionButton) would open. Control has get_screen_position()
-	// (screen-space) but no get_screen_rect(), so the rect is built by hand
-	// from that plus the button's own size.
-	const Vector2 button_pos = _skeleton_picker_button->get_screen_position();
-	const Vector2 button_size = _skeleton_picker_button->get_size();
-	_skeleton_popup->set_position(Vector2i(button_pos.x, button_pos.y + button_size.y));
-	_skeleton_popup->popup();
-}
-
-void MMDatabaseEditor::_on_skeleton_popup_selected(int p_index) {
-	if (p_index < 0 || p_index >= _skeleton_candidates.size()) {
-		return;
-	}
-	_skeleton_path->set_text(_skeleton_candidates[p_index]);
-	// MMNodePathField's own text_changed signal only fires on user typing,
-	// not on a programmatic set_text() -- so this mirrors what dropping a
-	// node already does, calling the same handler directly to persist the
-	// pick onto the resource immediately.
-	_on_skeleton_path_changed(_skeleton_candidates[p_index]);
-}
-
-void MMDatabaseEditor::_on_validate_pressed() {
-	Skeleton3D *skeleton = _resolve_skeleton();
-	if (skeleton == nullptr || _library.is_null()) {
-		return;
-	}
-	if (_schema.is_null()) {
-		_schema = MMFeatureSchema::make_default();
-	}
-
-	const Array issues = MMAnimationLibraryTools::validate_library(_library, skeleton, _schema);
-	if (issues.is_empty()) {
-		_log_line("Validation passed with no issues.", Color(0.5f, 1.0f, 0.6f));
-		return;
-	}
-	for (int i = 0; i < MIN(issues.size(), 40); i++) {
-		const Dictionary issue = issues[i];
-		const bool error = String(issue.get("severity", "warning")) == "error";
-		_log_line(vformat("[%s] %s %s", issue.get("severity", ""), issue.get("clip", ""),
-						issue.get("message", "")),
-				error ? Color(1, 0.5f, 0.4f) : Color(1, 0.85f, 0.4f));
-	}
-	if (issues.size() > 40) {
-		_log_line(vformat("...and %d more.", issues.size() - 40));
-	}
-}
-
-void MMDatabaseEditor::_on_build_pressed() {
-	Skeleton3D *skeleton = _resolve_skeleton();
-	if (skeleton == nullptr || _library.is_null()) {
-		return;
-	}
-	if (_extra_database.is_null() || _extra_database->get_box_count() == 0) {
-		_log_line("Add an animation set (box) first -- use \"+ Add Box\" above.", Color(1, 0.85f, 0.4f));
-		return;
-	}
-	Ref<MMBoxAnimation> box = _extra_database->get_box(_extra_database->get_active_box_index());
-	if (box.is_null() || box->get_database_count() == 0) {
-		_log_line("Add a database to this box first -- use \"+ Add Database\" above.", Color(1, 0.85f, 0.4f));
-		return;
-	}
-	if (_schema.is_null()) {
-		_schema = MMFeatureSchema::make_default();
-	}
-
-	Ref<MMFeatureExtractor> extractor;
-	extractor.instantiate();
-	extractor->set_schema(_schema);
-	extractor->set_sample_rate((float)_sample_rate->get_value());
-	extractor->set_root_yaw_offset_degrees((float)_root_yaw_offset->get_value());
-
-	const String left_foot = _selected_bone(_left_foot_override);
-	const String right_foot = _selected_bone(_right_foot_override);
-	if (!left_foot.is_empty() || !right_foot.is_empty()) {
-		// Only these two roles are ever set by hand here -- everything else
-		// stays on auto-detect (the extractor's auto_detect_profile default
-		// is left untouched). MMSkeletonProfile locks a role the moment it is
-		// set explicitly and keeps it through every future auto_detect() call,
-		// so this survives rebuilds instead of being overwritten.
-		Ref<MMSkeletonProfile> profile;
-		profile.instantiate();
-		if (!left_foot.is_empty()) {
-			profile->set_bone_name(MM_BONE_LEFT_FOOT, left_foot);
-		}
-		if (!right_foot.is_empty()) {
-			profile->set_bone_name(MM_BONE_RIGHT_FOOT, right_foot);
-		}
-		extractor->set_profile(profile);
-	}
-
-	_database = extractor->build_database(skeleton, _library, _clip_settings);
-	_progress->set_value(1.0);
-
-	if (_database.is_null()) {
-		_log_line(
-				"Build failed. Check the Output/Debugger panel for a \"Skeleton profile "
-				"detection failed\" message -- this usually means the picked skeleton uses "
-				"bone names auto-detect could not recognize.",
-				Color(1, 0.5f, 0.4f));
-		return;
-	}
-
-	// build_database() always returns a brand new object -- it never edits
-	// one in place -- so the name typed into "Database name" above has to be
-	// carried over by hand, and the box's slot has to be swapped rather than
-	// just reassigning the dock's own _database.
-	const int active_index = _extra_database->get_active_database_index();
-	Ref<MotionMatchingDatabase> previous = box->get_database(active_index);
-	_database->set_name(previous.is_valid() ? previous->get_name() : _database_name_edit->get_text());
-	_database->set_tag(previous.is_valid() && previous->get_tag() > 0 ? previous->get_tag() : (int)_database_tag->get_value());
-	box->set_database_at(active_index, _database);
-	_persist_extra_database();
-
-	const Dictionary stats = _database->get_statistics();
-	_log_line(vformat("Built %s frames from %s clips, %s dimensions, %.1f MB of features.",
-					  stats["frame_count"], stats["animation_count"], stats["dimension"],
-					  (double)(int64_t)stats["feature_bytes"] / 1048576.0),
-			Color(0.5f, 1.0f, 0.6f));
-}
-
-void MMDatabaseEditor::_save_all_databases() {
-	if (_extra_database.is_null() || _mm_resource.is_null() || _mm_resource->get_path().is_empty()) {
-		return;
-	}
-	const String base_dir = _mm_resource->get_path().get_base_dir();
-	for (int b = 0; b < _extra_database->get_box_count(); b++) {
-		Ref<MMBoxAnimation> box = _extra_database->get_box(b);
-		if (box.is_null()) {
+	// One pass over the tracks instead of one lookup per bone. A GASP clip has
+	// a few hundred tracks; a library has hundreds of thousands.
+	const int track_count = p_animation->get_track_count();
+	for (int t = 0; t < track_count; t++) {
+		const NodePath path = p_animation->track_get_path(t);
+		if (path.get_subname_count() == 0) {
 			continue;
 		}
-		const String box_name = box->get_name().is_empty() ? vformat("box%d", b + 1) : box->get_name();
-		for (int d = 0; d < box->get_database_count(); d++) {
-			Ref<MotionMatchingDatabase> database = box->get_database(d);
-			if (database.is_null()) {
-				continue;
-			}
-			// Always targets the SAME file a database already points at (if
-			// it has one), overwriting it in place, so anything already
-			// wired up to that .res path keeps working without needing to
-			// be re-pointed. Only a database that has never been saved
-			// before gets a fresh path, named after its box and its own
-			// name so multiple databases never collide in one folder.
-			String database_path = database->get_path();
-			if (database_path.is_empty()) {
-				const String database_name = database->get_name().is_empty() ? vformat("database%d", d + 1) : database->get_name();
-				database_path = base_dir.path_join("databases")
-										.path_join(box_name.to_snake_case() + "_" + database_name.to_snake_case() + ".res");
-			}
-			const Error error = ResourceSaver::get_singleton()->save(database, database_path);
-			if (error != OK) {
-				_log_line(vformat("Could not save \"%s / %s\" to %s (error %d).",
-									box_name, database->get_name(), database_path, (int)error),
-						Color(1, 0.5f, 0.4f));
-			}
+		const String bone_name = path.get_subname(path.get_subname_count() - 1);
+		HashMap<String, int>::Iterator it = bone_lookup.find(bone_name);
+		if (!it) {
+			continue;
+		}
+
+		BoneTracks &tracks = _tracks.write[it->value];
+		switch (p_animation->track_get_type(t)) {
+			case Animation::TYPE_POSITION_3D:
+				tracks.position = t;
+				break;
+			case Animation::TYPE_ROTATION_3D:
+				tracks.rotation = t;
+				break;
+			case Animation::TYPE_SCALE_3D:
+				tracks.scale = t;
+				break;
+			default:
+				break;
+		}
+	}
+
+	_root_bone = -1;
+	if (!p_root_bone.is_empty()) {
+		HashMap<String, int>::Iterator it = bone_lookup.find(p_root_bone);
+		if (it && (_tracks[it->value].position >= 0 || _tracks[it->value].rotation >= 0)) {
+			// A root bone with no animated track is not a root motion source.
+			_root_bone = it->value;
+		}
+	}
+
+	_fallback_root = -1;
+	if (!p_pelvis_bone.is_empty()) {
+		HashMap<String, int>::Iterator it = bone_lookup.find(p_pelvis_bone);
+		if (it) {
+			_fallback_root = it->value;
+		}
+	}
+
+	_bound_tracks = 0;
+	for (int i = 0; i < _bone_count; i++) {
+		if (_tracks[i].position >= 0 || _tracks[i].rotation >= 0) {
+			_bound_tracks++;
+		}
+	}
+
+	return _bound_tracks > 0;
+}
+
+void MMPoseSampler::unbind() {
+	_skeleton = nullptr;
+	_animation.unref();
+	_tracks.clear();
+	_bone_count = 0;
+	_root_bone = -1;
+}
+
+void MMPoseSampler::sample(double p_time) {
+	if (_animation.is_null() || _bone_count == 0) {
+		return;
+	}
+
+	for (int i = 0; i < _bone_count; i++) {
+		const BoneTracks &tracks = _tracks[i];
+		Transform3D local = _rest[i];
+
+		if (tracks.position >= 0) {
+			local.origin = _animation->position_track_interpolate(tracks.position, p_time);
+		}
+		if (tracks.rotation >= 0) {
+			const Quaternion rotation = _animation->rotation_track_interpolate(tracks.rotation, p_time);
+			const Vector3 scale = local.basis.get_scale();
+			local.basis = Basis(rotation).scaled(scale);
+		}
+		if (tracks.scale >= 0) {
+			const Vector3 scale = _animation->scale_track_interpolate(tracks.scale, p_time);
+			local.basis = local.basis.orthonormalized().scaled(scale);
+		}
+
+		_local.write[i] = local;
+	}
+
+	// Bones are stored parent first in Godot, so a single forward pass gives
+	// every model space transform.
+	for (int i = 0; i < _bone_count; i++) {
+		const int parent = _parents[i];
+		if (parent >= 0) {
+			_model.write[i] = _model[parent] * _local[i];
+		} else {
+			_model.write[i] = _local[i];
 		}
 	}
 }
 
-void MMDatabaseEditor::_on_save_pressed() {
-	if (_database.is_null()) {
-		_log_line("Nothing to save yet. Press Build database first.", Color(1, 0.85f, 0.4f));
-		return;
+Transform3D MMPoseSampler::get_model_transform(int p_bone) const {
+	if (p_bone < 0 || p_bone >= _bone_count) {
+		return Transform3D();
 	}
-	if (_mm_resource.is_null()) {
-		_log_line("Assign a Motion Matching Resource above first.", Color(1, 0.5f, 0.4f));
-		return;
-	}
-	if (_mm_resource->get_path().is_empty()) {
-		_log_line(
-				"Save the Motion Matching Resource to disk first (from the Inspector), so there "
-				"is a folder to save databases next to.",
-				Color(1, 0.5f, 0.4f));
-		return;
-	}
-
-	// Every box and every database gets saved, not just the one currently
-	// selected -- otherwise switching to a different box before pressing
-	// Save would silently skip whatever was built for the others.
-	_save_all_databases();
-
-	_mm_resource->set_database(_extra_database);
-	const Error error = ResourceSaver::get_singleton()->save(_mm_resource, _mm_resource->get_path());
-	if (error != OK) {
-		_log_line(vformat("Save failed with error %d.", (int)error), Color(1, 0.5f, 0.4f));
-		return;
-	}
-
-	_log_line("Saved.", Color(0.5f, 1.0f, 0.6f));
+	return _model[p_bone];
 }
 
-void MMDatabaseEditor::_on_clip_edited() {
-	TreeItem *item = _clip_table->get_edited();
-	if (item == nullptr) {
-		return;
+Transform3D MMPoseSampler::get_local_transform(int p_bone) const {
+	if (p_bone < 0 || p_bone >= _bone_count) {
+		return Transform3D();
 	}
-	const String key = item->get_metadata(0);
-	Dictionary settings = _clip_settings.get(key, Dictionary());
-	settings["tags"] = item->get_text(3).to_int();
-	settings["category"] = MMFeatureExtractor::guess_category_from_tags(settings["tags"]);
-	_clip_settings[key] = settings;
+	return _local[p_bone];
 }
 
-void MMDatabaseEditor::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("_on_resource_picked", "resource"), &MMDatabaseEditor::_on_resource_picked);
-	ClassDB::bind_method(D_METHOD("_on_library_picked", "resource"), &MMDatabaseEditor::_on_library_picked);
-	ClassDB::bind_method(D_METHOD("_on_skeleton_path_changed", "text"), &MMDatabaseEditor::_on_skeleton_path_changed);
-	ClassDB::bind_method(D_METHOD("_on_skeleton_picker_pressed"), &MMDatabaseEditor::_on_skeleton_picker_pressed);
-	ClassDB::bind_method(D_METHOD("_on_skeleton_popup_selected", "index"), &MMDatabaseEditor::_on_skeleton_popup_selected);
-	ClassDB::bind_method(D_METHOD("_on_use_external_skeleton_toggled", "pressed"), &MMDatabaseEditor::_on_use_external_skeleton_toggled);
-	ClassDB::bind_method(D_METHOD("_on_left_foot_override_changed", "index"), &MMDatabaseEditor::_on_left_foot_override_changed);
-	ClassDB::bind_method(D_METHOD("_on_right_foot_override_changed", "index"), &MMDatabaseEditor::_on_right_foot_override_changed);
-	ClassDB::bind_method(D_METHOD("_on_box_selected", "index"), &MMDatabaseEditor::_on_box_selected);
-	ClassDB::bind_method(D_METHOD("_on_add_box_pressed"), &MMDatabaseEditor::_on_add_box_pressed);
-	ClassDB::bind_method(D_METHOD("_on_box_name_changed", "text"), &MMDatabaseEditor::_on_box_name_changed);
-	ClassDB::bind_method(D_METHOD("_on_database_selected", "index"), &MMDatabaseEditor::_on_database_selected);
-	ClassDB::bind_method(D_METHOD("_on_add_database_pressed"), &MMDatabaseEditor::_on_add_database_pressed);
-	ClassDB::bind_method(D_METHOD("_on_database_name_changed", "text"), &MMDatabaseEditor::_on_database_name_changed);
-	ClassDB::bind_method(D_METHOD("_on_loop_toggle_toggled", "pressed"), &MMDatabaseEditor::_on_loop_toggle_toggled);
-	ClassDB::bind_method(D_METHOD("_on_database_tag_changed", "value"), &MMDatabaseEditor::_on_database_tag_changed);
-	ClassDB::bind_method(D_METHOD("_on_advanced_toggle_pressed"), &MMDatabaseEditor::_on_advanced_toggle_pressed);
-	ClassDB::bind_method(D_METHOD("_on_scan_pressed"), &MMDatabaseEditor::_on_scan_pressed);
-	ClassDB::bind_method(D_METHOD("_on_build_pressed"), &MMDatabaseEditor::_on_build_pressed);
-	ClassDB::bind_method(D_METHOD("_on_save_pressed"), &MMDatabaseEditor::_on_save_pressed);
-	ClassDB::bind_method(D_METHOD("_on_validate_pressed"), &MMDatabaseEditor::_on_validate_pressed);
-	ClassDB::bind_method(D_METHOD("_on_clip_edited"), &MMDatabaseEditor::_on_clip_edited);
+Transform3D MMPoseSampler::get_root_transform() const {
+	if (_root_bone >= 0) {
+		return _model[_root_bone];
+	}
+	if (_fallback_root >= 0) {
+		// No animated root: the pelvis becomes the reference, flattened to the
+		// ground so vertical bob does not leak into the trajectory. This is
+		// the normal case for in place animation packs.
+		return mm_project_yaw(_model[_fallback_root]);
+	}
+	if (_bone_count > 0) {
+		return mm_project_yaw(_model[0]);
+	}
+	return Transform3D();
 }
 
-#endif // TOOLS_ENABLED
+Dictionary MMPoseSampler::sample_bone(const String &p_bone_name, double p_time) {
+	Dictionary result;
+	if (_skeleton == nullptr) {
+		return result;
+	}
+	const int bone = _skeleton->find_bone(p_bone_name);
+	if (bone < 0) {
+		return result;
+	}
+	sample(p_time);
+	result["model"] = _model[bone];
+	result["local"] = _local[bone];
+	result["root"] = get_root_transform();
+	return result;
+}
+
+void MMPoseSampler::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("bind", "skeleton", "animation", "root_bone", "pelvis_bone"),
+			&MMPoseSampler::bind);
+	ClassDB::bind_method(D_METHOD("get_bound_track_count"), &MMPoseSampler::get_bound_track_count);
+	ClassDB::bind_method(D_METHOD("unbind"), &MMPoseSampler::unbind);
+	ClassDB::bind_method(D_METHOD("sample", "time"), &MMPoseSampler::sample);
+	ClassDB::bind_method(D_METHOD("sample_bone", "bone_name", "time"), &MMPoseSampler::sample_bone);
+	ClassDB::bind_method(D_METHOD("get_model_transform", "bone"), &MMPoseSampler::get_model_transform);
+	ClassDB::bind_method(D_METHOD("get_local_transform", "bone"), &MMPoseSampler::get_local_transform);
+	ClassDB::bind_method(D_METHOD("get_root_transform"), &MMPoseSampler::get_root_transform);
+	ClassDB::bind_method(D_METHOD("get_bone_count"), &MMPoseSampler::get_bone_count);
+}
+
+// ---------------------------------------------------------------------------
+// MMFeatureExtractor
+// ---------------------------------------------------------------------------
+
+void MMFeatureExtractor::set_schema(const Ref<MMFeatureSchema> &p_schema) {
+	_schema = p_schema;
+}
+
+void MMFeatureExtractor::set_profile(const Ref<MMSkeletonProfile> &p_profile) {
+	_profile = p_profile;
+}
+
+void MMFeatureExtractor::set_analyzer(const Ref<MMClipAnalyzer> &p_analyzer) {
+	_analyzer = p_analyzer;
+}
+
+void MMFeatureExtractor::_extract_extra(float *r_features, int p_count, double p_time) {
+	// Default: leave the extra block zeroed. Override to add weapon state,
+	// combat phase, or any gameplay signal that should influence matching.
+	for (int i = 0; i < p_count; i++) {
+		r_features[i] = 0.0f;
+	}
+}
+
+// Discovers everything the pipeline needs about this particular rig. Called
+// once per build, and safe to call again after the skeleton changes.
+bool MMFeatureExtractor::_prepare(Skeleton3D *p_skeleton) {
+	ERR_FAIL_NULL_V(p_skeleton, false);
+
+	if (_profile.is_null()) {
+		_profile.instantiate();
+	}
+	_last_prepare_report = String();
+	if (_auto_detect_profile && !_profile->is_detected()) {
+		if (!_profile->auto_detect(p_skeleton)) {
+			_last_prepare_report = _profile->get_detection_report();
+			// Auto-detect failing does not automatically mean the build has
+			// to stop: it only means the *heuristics* could not confirm every
+			// role on this particular rig. If the three roles the pipeline
+			// actually depends on (pelvis + both feet -- see
+			// get_default_pose_bones()) were already locked in by hand
+			// (manual overrides in the dock), proceed with those instead of
+			// aborting the whole build over roles nothing here needs.
+			const bool has_minimum_roles = _profile->has_role(MM_BONE_PELVIS) &&
+					_profile->has_role(MM_BONE_LEFT_FOOT) &&
+					_profile->has_role(MM_BONE_RIGHT_FOOT);
+			if (!has_minimum_roles) {
+				ERR_PRINT("Skeleton profile detection failed: " + _last_prepare_report);
+				return false;
+			}
+			WARN_PRINT("Skeleton auto-detect did not confirm every role, but pelvis and both feet "
+					   "are set manually -- continuing with those. Detection report: " +
+					_last_prepare_report);
+		}
+	}
+	if (_analyzer.is_null()) {
+		_analyzer.instantiate();
+	}
+
+	// The character's own scale, taken from the rest pose. Every threshold in
+	// the pipeline is expressed as a ratio of this, so nothing has to be
+	// retuned for a different sized character.
+	_hip_height = 1.0f;
+	const int pelvis = _profile->find_bone(p_skeleton, MM_BONE_PELVIS);
+	if (pelvis >= 0) {
+		Transform3D model;
+		int walker = pelvis;
+		Vector<int> chain;
+		while (walker >= 0) {
+			chain.insert(0, walker);
+			walker = p_skeleton->get_bone_parent(walker);
+		}
+		for (int i = 0; i < chain.size(); i++) {
+			model = model * p_skeleton->get_bone_rest(chain[i]);
+		}
+		if (model.origin.y > 0.05f) {
+			_hip_height = model.origin.y;
+		}
+	}
+
+	if (_schema.is_null()) {
+		_schema.instantiate();
+	}
+	if (_auto_configure_schema) {
+		// Seed the schema from the roles that were actually found, instead of
+		// from a list of names that may not exist on this rig.
+		const PackedStringArray bones = _profile->get_default_pose_bones();
+		if (!bones.is_empty()) {
+			_schema->set_pose_bones(bones);
+		}
+		_schema->set_root_bone(_profile->get_bone_name(MM_BONE_ROOT));
+	}
+
+	return true;
+}
+
+void MMFeatureExtractor::_resolve_pose_bones(Skeleton3D *p_skeleton) {
+	const PackedStringArray bone_names = _schema->get_pose_bones();
+	_pose_bone_indices.resize(bone_names.size());
+	// Fixed by role, not by the order feet happen to appear in pose_bones:
+	// slot 0 is always left, slot 1 is always right, matching the bit 0 =
+	// left foot / bit 1 = right foot convention the baked contact flags use.
+	_foot_slots.resize(2);
+	_foot_slots.write[0] = -1;
+	_foot_slots.write[1] = -1;
+
+	const String left_foot = _profile.is_valid() ? _profile->get_bone_name(MM_BONE_LEFT_FOOT) : String();
+	const String right_foot = _profile.is_valid() ? _profile->get_bone_name(MM_BONE_RIGHT_FOOT) : String();
+
+	for (int i = 0; i < bone_names.size(); i++) {
+		_pose_bone_indices.write[i] = p_skeleton->find_bone(bone_names[i]);
+		// Contact detection is driven by role, not by looking for the word
+		// "foot" in a bone name.
+		if (!left_foot.is_empty() && bone_names[i] == left_foot) {
+			_foot_slots.write[0] = i;
+		} else if (!right_foot.is_empty() && bone_names[i] == right_foot) {
+			_foot_slots.write[1] = i;
+		}
+	}
+}
+
+// Measures the clip. This is the whole basis for automatic tagging, and it
+// never looks at the clip's name.
+Dictionary MMFeatureExtractor::analyze_animation(Skeleton3D *p_skeleton, const Ref<Animation> &p_animation) {
+	Dictionary empty;
+	ERR_FAIL_NULL_V(p_skeleton, empty);
+	ERR_FAIL_COND_V(p_animation.is_null(), empty);
+	if (!_prepare(p_skeleton)) {
+		return empty;
+	}
+
+	Ref<MMPoseSampler> sampler;
+	sampler.instantiate();
+	if (!sampler->bind(p_skeleton, p_animation, _profile->get_bone_name(MM_BONE_ROOT),
+				_profile->get_bone_name(MM_BONE_PELVIS))) {
+		return empty;
+	}
+
+	const int pelvis = _profile->find_bone(p_skeleton, MM_BONE_PELVIS);
+	const int left_foot = _profile->find_bone(p_skeleton, MM_BONE_LEFT_FOOT);
+	const int right_foot = _profile->find_bone(p_skeleton, MM_BONE_RIGHT_FOOT);
+
+	const double length = p_animation->get_length();
+	const double step = 1.0 / (double)_sample_rate;
+	const int frames = MAX(2, (int)Math::floor(length / step) + 1);
+
+	MMClipStats stats;
+	stats.duration = (float)length;
+	stats.hip_height = _hip_height;
+
+	Vector3 previous_root;
+	Vector3 previous_left;
+	Vector3 previous_right;
+	float previous_yaw = 0.0f;
+	Vector3 first_position;
+	Vector3 last_position;
+
+	float speed_sum = 0.0f;
+	float lateral_sum = 0.0f;
+	float backward_sum = 0.0f;
+	float travel_sum = 0.0f;
+	int contact_frames = 0;
+	int crouch_frames = 0;
+	float airborne_run = 0.0f;
+	float minimum_height = MM_INFINITY;
+	float maximum_height = -MM_INFINITY;
+
+	const float contact_speed = _foot_contact_speed_ratio * _hip_height;
+	const float contact_height = _foot_contact_height_ratio * _hip_height;
+	const float crouch_height = _hip_height * (1.0f - _analyzer->get_crouch_drop());
+
+	for (int f = 0; f < frames; f++) {
+		const double time = MIN((double)f * step, length);
+		sampler->sample(time);
+
+		const Transform3D root = sampler->get_root_transform();
+		const Vector3 position = root.origin;
+		if (f == 0) {
+			first_position = position;
+			previous_root = position;
+			previous_left = left_foot >= 0 ? sampler->get_model_transform(left_foot).origin : Vector3();
+			previous_right = right_foot >= 0 ? sampler->get_model_transform(right_foot).origin : Vector3();
+			const Vector3 forward = -root.basis.get_column(2);
+			previous_yaw = Math::atan2(forward.x, -forward.z);
+		}
+		last_position = position;
+
+		const Vector3 delta = position - previous_root;
+		const float travel = Vector2(delta.x, delta.z).length();
+		const float speed = travel / (float)step;
+		speed_sum += speed;
+		stats.peak_speed = MAX(stats.peak_speed, speed / _hip_height);
+		if (f == 1) {
+			stats.start_speed = speed / _hip_height;
+		}
+		if (f == frames - 1) {
+			stats.end_speed = speed / _hip_height;
+		}
+
+		// Direction of travel relative to the character's own facing, so a
+		// sidestep is a sidestep regardless of world orientation.
+		if (travel > 0.0001f) {
+			const Vector3 local = root.basis.inverse().xform(delta);
+			lateral_sum += Math::abs(local.x);
+			backward_sum += MAX(local.z, 0.0f);
+			travel_sum += travel;
+		}
+
+		const Vector3 forward = -root.basis.get_column(2);
+		const float yaw = Math::atan2(forward.x, -forward.z);
+		float yaw_delta = yaw - previous_yaw;
+		while (yaw_delta > Math_PI) {
+			yaw_delta -= Math_TAU;
+		}
+		while (yaw_delta < -Math_PI) {
+			yaw_delta += Math_TAU;
+		}
+		stats.total_turn += Math::abs(yaw_delta);
+		previous_yaw = yaw;
+
+		// Foot contact from measured motion: a foot that is low and slow is
+		// planted. No naming convention involved.
+		bool planted = false;
+		if (left_foot >= 0) {
+			const Vector3 foot = sampler->get_model_transform(left_foot).origin;
+			const float foot_speed = (foot - previous_left).length() / (float)step;
+			const float height = foot.y - position.y;
+			planted = planted || (foot_speed < contact_speed && height < contact_height);
+			previous_left = foot;
+		}
+		if (right_foot >= 0) {
+			const Vector3 foot = sampler->get_model_transform(right_foot).origin;
+			const float foot_speed = (foot - previous_right).length() / (float)step;
+			const float height = foot.y - position.y;
+			planted = planted || (foot_speed < contact_speed && height < contact_height);
+			previous_right = foot;
+		}
+
+		if (planted) {
+			contact_frames++;
+			airborne_run = 0.0f;
+		} else {
+			airborne_run += (float)step;
+			stats.longest_airborne = MAX(stats.longest_airborne, airborne_run);
+		}
+
+		if (pelvis >= 0) {
+			const float pelvis_height = sampler->get_model_transform(pelvis).origin.y - position.y;
+			minimum_height = MIN(minimum_height, pelvis_height);
+			maximum_height = MAX(maximum_height, pelvis_height);
+			if (pelvis_height < crouch_height) {
+				crouch_frames++;
+			}
+		}
+
+		previous_root = position;
+	}
+
+	stats.average_speed = (speed_sum / (float)frames) / _hip_height;
+	stats.net_displacement = Vector2(last_position.x - first_position.x,
+										last_position.z - first_position.z)
+									.length() /
+			_hip_height;
+	stats.net_height_gain = (last_position.y - first_position.y) / _hip_height;
+	stats.vertical_range = (minimum_height < maximum_height ? maximum_height - minimum_height : 0.0f) /
+			_hip_height;
+	stats.contact_ratio = (float)contact_frames / (float)frames;
+	stats.crouch_ratio = (float)crouch_frames / (float)frames;
+	stats.lateral_ratio = travel_sum > 0.0001f ? lateral_sum / travel_sum : 0.0f;
+	stats.backward_ratio = travel_sum > 0.0001f ? backward_sum / travel_sum : 0.0f;
+
+	sampler->unbind();
+	return MMClipAnalyzer::stats_to_dictionary(stats);
+}
+
+Dictionary MMFeatureExtractor::analyze_library(Skeleton3D *p_skeleton,
+		const Ref<AnimationLibrary> &p_library) {
+	Dictionary settings;
+	ERR_FAIL_NULL_V(p_skeleton, settings);
+	ERR_FAIL_COND_V(p_library.is_null(), settings);
+	if (!_prepare(p_skeleton)) {
+		return settings;
+	}
+
+	const PackedStringArray names = p_library->get_animation_list();
+	for (int i = 0; i < names.size(); i++) {
+		_progress = names.size() > 0 ? (float)i / (float)names.size() : 1.0f;
+		_progress_label = names[i];
+
+		Ref<Animation> animation = p_library->get_animation(names[i]);
+		if (animation.is_null()) {
+			continue;
+		}
+
+		const Dictionary stats = analyze_animation(p_skeleton, animation);
+		if (stats.is_empty()) {
+			continue;
+		}
+
+		const int tags = _analyzer->classify_dictionary(stats, names[i]);
+		Dictionary entry;
+		entry["tags"] = tags;
+		entry["category"] = MMClipAnalyzer::category_for_tags(tags);
+		entry["stats"] = stats;
+		settings[names[i]] = entry;
+	}
+
+	_progress = 1.0f;
+	return settings;
+}
+
+bool MMFeatureExtractor::append_animation(const Ref<MotionMatchingDatabase> &p_database,
+		Skeleton3D *p_skeleton, const Ref<Animation> &p_animation, const String &p_name,
+		const String &p_library, int p_category, int p_tags) {
+	ERR_FAIL_COND_V(p_database.is_null(), false);
+	ERR_FAIL_NULL_V(p_skeleton, false);
+	ERR_FAIL_COND_V(p_animation.is_null(), false);
+	if (!_prepare(p_skeleton)) {
+		return false;
+	}
+	_resolve_pose_bones(p_skeleton);
+
+	ClipExtractionResult result;
+	if (!_extract_clip(p_skeleton, p_animation, p_name, p_library, p_category, p_tags, result)) {
+		return false;
+	}
+	_commit_clip_result(p_database, result);
+	return true;
+}
+
+// Everything append_animation() used to do after resolving the pose bones,
+// minus the final merge into p_database -- this is the part build_database()
+// runs from worker threads. Every read here (_schema, _profile,
+// _pose_bone_indices, _foot_slots, _hip_height, the tuning ratios, ...) is
+// fixed for the whole build by the time this is called, so concurrent calls
+// never race with each other; the only mutable state is the sampler and the
+// result, both local to this one call.
+bool MMFeatureExtractor::_extract_clip(Skeleton3D *p_skeleton, const Ref<Animation> &p_animation,
+		const String &p_name, const String &p_library, int p_category, int p_tags,
+		ClipExtractionResult &r_result) {
+	Ref<MMPoseSampler> sampler;
+	sampler.instantiate();
+	if (!sampler->bind(p_skeleton, p_animation, _profile->get_bone_name(MM_BONE_ROOT),
+				_profile->get_bone_name(MM_BONE_PELVIS))) {
+		return false;
+	}
+
+	const PackedStringArray bone_names = _schema->get_pose_bones();
+	const double length = p_animation->get_length();
+	// A clip loops only if none of its tags mark it as a discrete, one-shot
+	// motion (see MM_TAG_MASK_ONE_SHOT) -- a sustained cycle like a walk or
+	// run loop repeats; a jump, a landing, a start/stop, a turn-in-place, a
+	// traversal move, or an attack does not. This is driven entirely by the
+	// tags already assigned to the clip (whether auto-detected from its
+	// motion or set by hand in the dock), so it works the same way for
+	// GASP, Mixamo, custom, or motion-capture libraries without needing any
+	// animation name to be hardcoded. When a one-shot clip reaches its own
+	// end during playback, the controller forces a fresh search instead of
+	// looping it back to frame zero (see _advance_playback()).
+	const bool loop = (p_tags & MM_TAG_MASK_ONE_SHOT) == 0;
+	const double step = 1.0 / (double)_sample_rate;
+	const int frame_count = MAX(1, (int)Math::floor(length / step) + 1);
+	const int bone_count = bone_names.size();
+
+	// Pass A: cache the root transform and the tracked bone positions for the
+	// whole clip. Sampling is the expensive part, so it happens exactly once
+	// per frame instead of once per feature.
+	Vector<Transform3D> root_track;
+	Vector<Vector3> bone_track;
+	root_track.resize(frame_count);
+	bone_track.resize(frame_count * MAX(1, bone_count));
+
+	for (int f = 0; f < frame_count; f++) {
+		const double time = MIN((double)f * step, length);
+		sampler->sample(time);
+		root_track.write[f] = sampler->get_root_transform();
+		for (int b = 0; b < bone_count; b++) {
+			const int bone = _pose_bone_indices[b];
+			bone_track.write[f * bone_count + b] =
+					bone >= 0 ? sampler->get_model_transform(bone).origin : Vector3();
+		}
+	}
+
+	// Pass B: build the feature vectors, entirely into this result's own
+	// arrays -- nothing here touches the shared database.
+	const int dimension = _schema->get_dimension();
+	const int trajectory_points = _schema->get_trajectory_point_count();
+	const PackedFloat32Array trajectory_times = _schema->get_trajectory_times();
+
+	r_result.features.resize((int64_t)frame_count * dimension);
+	float *feature_ptr = r_result.features.ptrw();
+
+	const float contact_speed = _foot_contact_speed_ratio * _hip_height;
+	const float contact_height = _foot_contact_height_ratio * _hip_height;
+
+	float speed_min = MM_INFINITY;
+	float speed_max = 0.0f;
+
+	for (int f = 0; f < frame_count; f++) {
+		float *row = feature_ptr + (int64_t)f * dimension;
+		for (int d = 0; d < dimension; d++) {
+			row[d] = 0.0f;
+		}
+
+		const Transform3D root = root_track[f];
+		// Some rigs' root/hip bone rest orientation does not point in the
+		// direction the character actually walks (commonly 180 degrees
+		// off on Mixamo-style rigs). root_yaw_offset_degrees recalibrates
+		// every local-space projection below -- velocity, pose, and
+		// trajectory alike -- so they all agree on the same forward.
+		const Basis yaw_correction = _root_yaw_offset_degrees != 0.0f
+				? Basis(Vector3(0, 1, 0), Math::deg_to_rad(_root_yaw_offset_degrees))
+				: Basis();
+		const Basis corrected_basis = yaw_correction * root.basis;
+		const Basis inverse_basis = corrected_basis.inverse();
+		const Transform3D corrected_root(corrected_basis, root.origin);
+		const Transform3D inverse_root = corrected_root.affine_inverse();
+
+		const int previous = loop ? (f - 1 + frame_count) % frame_count : MAX(0, f - 1);
+		const int next = loop ? (f + 1) % frame_count : MIN(frame_count - 1, f + 1);
+		const double span = (double)(next - previous) * step;
+		const double inverse_span = span > 0.0 ? 1.0 / span : 0.0;
+
+		Vector3 root_velocity = (root_track[next].origin - root_track[previous].origin) * inverse_span;
+		root_velocity = inverse_basis.xform(root_velocity);
+
+		const Vector3 forward_next = -root_track[next].basis.get_column(2);
+		const Vector3 forward_previous = -root_track[previous].basis.get_column(2);
+		const float yaw_next = Math::atan2(forward_next.x, -forward_next.z);
+		const float yaw_previous = Math::atan2(forward_previous.x, -forward_previous.z);
+		float yaw_delta = yaw_next - yaw_previous;
+		while (yaw_delta > Math_PI) {
+			yaw_delta -= Math_TAU;
+		}
+		while (yaw_delta < -Math_PI) {
+			yaw_delta += Math_TAU;
+		}
+		const float angular_velocity = (float)(yaw_delta * inverse_span);
+
+		// Trajectory block.
+		const int position_offset = _schema->get_trajectory_position_offset();
+		const int direction_offset = _schema->get_trajectory_direction_offset();
+		for (int t = 0; t < trajectory_points; t++) {
+			const double horizon = trajectory_times[t];
+			const double target_time = (double)f * step + horizon;
+
+			Transform3D future;
+			if (loop) {
+				int index = (int)Math::round(target_time / step);
+				index = ((index % frame_count) + frame_count) % frame_count;
+				future = root_track[index];
+			} else if (target_time <= length) {
+				const int index = CLAMP((int)Math::round(target_time / step), 0, frame_count - 1);
+				future = root_track[index];
+			} else {
+				// Past the end of a one shot clip: continue along the last
+				// known velocity instead of flattening the line, which would
+				// make every clip look like a stop.
+				const double overshoot = target_time - length;
+				future = root_track[frame_count - 1];
+				const Vector3 tail = (root_track[frame_count - 1].origin -
+											 root_track[MAX(0, frame_count - 2)].origin) /
+						step;
+				future.origin += tail * overshoot;
+			}
+
+			const Transform3D local = inverse_root * future;
+			row[position_offset + t * 2 + 0] = local.origin.x;
+			row[position_offset + t * 2 + 1] = local.origin.z;
+
+			// Direction is a relative rotation between two frames of the same
+			// rig, not a point in space -- a constant yaw offset applied to
+			// only the current frame's side (as inverse_root.basis is here)
+			// would re-introduce that offset as a spurious extra rotation on
+			// top of the real relative angle. Since the same constant offset
+			// would apply identically to every frame of this clip, it always
+			// cancels out of a frame-to-frame relative angle, so the raw,
+			// uncorrected root basis is used here instead of inverse_root.
+			Vector3 direction = -(root.basis.inverse() * future.basis).get_column(2);
+			direction.y = 0.0f;
+			if (direction.length_squared() > 0.000001f) {
+				direction.normalize();
+			} else {
+				direction = Vector3(0, 0, -1);
+			}
+			row[direction_offset + t * 2 + 0] = direction.x;
+			row[direction_offset + t * 2 + 1] = direction.z;
+		}
+
+		if (_schema->get_include_root_velocity()) {
+			const int offset = _schema->get_root_velocity_offset();
+			row[offset + 0] = root_velocity.x;
+			row[offset + 1] = root_velocity.y;
+			row[offset + 2] = root_velocity.z;
+		}
+
+		// Pose block.
+		const int bone_position_offset = _schema->get_bone_position_offset();
+		const int bone_velocity_offset = _schema->get_bone_velocity_offset();
+		uint8_t contacts = 0;
+
+		for (int b = 0; b < bone_count; b++) {
+			const Vector3 world_position = bone_track[f * bone_count + b];
+			const Vector3 local_position = inverse_root.xform(world_position);
+			row[bone_position_offset + b * 3 + 0] = local_position.x;
+			row[bone_position_offset + b * 3 + 1] = local_position.y;
+			row[bone_position_offset + b * 3 + 2] = local_position.z;
+
+			const Vector3 velocity = inverse_basis.xform(
+					(bone_track[next * bone_count + b] - bone_track[previous * bone_count + b]) *
+					inverse_span);
+
+			if (_schema->get_include_bone_velocity()) {
+				row[bone_velocity_offset + b * 3 + 0] = velocity.x;
+				row[bone_velocity_offset + b * 3 + 1] = velocity.y;
+				row[bone_velocity_offset + b * 3 + 2] = velocity.z;
+			}
+
+			// Contact flags come from the foot roles resolved by the profile,
+			// so this works on a rig whose bones are called bone_041.
+			for (int s = 0; s < _foot_slots.size(); s++) {
+				if (_foot_slots[s] != b) {
+					continue;
+				}
+				if (velocity.length() < contact_speed && local_position.y < contact_height) {
+					contacts |= (uint8_t)(1 << s);
+				}
+			}
+		}
+
+		if (_schema->get_extra_dimensions() > 0) {
+			_extract_extra(row + _schema->get_extra_offset(), _schema->get_extra_dimensions(),
+					(double)f * step);
+		}
+
+		const float planar_speed = Vector2(root_velocity.x, root_velocity.z).length();
+		speed_min = MIN(speed_min, planar_speed);
+		speed_max = MAX(speed_max, planar_speed);
+
+		r_result.frame_time.push_back((float)((double)f * step));
+		r_result.frame_normalized.push_back(length > 0.0 ? (float)((double)f * step / length) : 0.0f);
+		r_result.frame_root_velocity.push_back(root_velocity);
+		r_result.frame_angular.push_back(angular_velocity);
+		r_result.frame_speed.push_back(planar_speed);
+		r_result.frame_tags.push_back(p_tags);
+		r_result.frame_category.push_back((uint8_t)p_category);
+		r_result.frame_contacts.push_back(contacts);
+	}
+
+	r_result.name = p_name;
+	r_result.library = p_library;
+	r_result.category = p_category;
+	r_result.tags = p_tags;
+	r_result.length = (float)length;
+	r_result.loop = loop;
+	r_result.frame_count = frame_count;
+	r_result.speed_min = speed_min == MM_INFINITY ? 0.0f : speed_min;
+	r_result.speed_max = speed_max;
+	return true;
+}
+
+// The one step that actually mutates the shared database, so build_database()
+// only ever calls this after its worker threads (which call _extract_clip()
+// above) have all joined.
+void MMFeatureExtractor::_commit_clip_result(const Ref<MotionMatchingDatabase> &p_database,
+		const ClipExtractionResult &p_result) {
+	PackedFloat32Array features = p_database->get_features();
+	PackedInt32Array frame_animation = p_database->get_frame_animation();
+	PackedFloat32Array frame_time = p_database->get_frame_time();
+	PackedFloat32Array frame_normalized = p_database->get_frame_normalized_time();
+	PackedVector3Array frame_root_velocity = p_database->get_frame_root_velocity();
+	PackedFloat32Array frame_angular = p_database->get_frame_angular_velocity();
+	PackedFloat32Array frame_speed = p_database->get_frame_speed();
+	PackedInt32Array frame_tags = p_database->get_frame_tags();
+	PackedByteArray frame_category = p_database->get_frame_category();
+	PackedByteArray frame_contacts = p_database->get_frame_contacts();
+
+	const int animation_id = p_database->get_animation_count();
+	const int frame_start = frame_animation.size();
+
+	features.append_array(p_result.features);
+	for (int f = 0; f < p_result.frame_count; f++) {
+		frame_animation.push_back(animation_id);
+	}
+	frame_time.append_array(p_result.frame_time);
+	frame_normalized.append_array(p_result.frame_normalized);
+	frame_root_velocity.append_array(p_result.frame_root_velocity);
+	frame_angular.append_array(p_result.frame_angular);
+	frame_speed.append_array(p_result.frame_speed);
+	frame_tags.append_array(p_result.frame_tags);
+	frame_category.append_array(p_result.frame_category);
+	frame_contacts.append_array(p_result.frame_contacts);
+
+	p_database->set_features(features);
+	p_database->set_frame_animation(frame_animation);
+	p_database->set_frame_time(frame_time);
+	p_database->set_frame_normalized_time(frame_normalized);
+	p_database->set_frame_root_velocity(frame_root_velocity);
+	p_database->set_frame_angular_velocity(frame_angular);
+	p_database->set_frame_speed(frame_speed);
+	p_database->set_frame_tags(frame_tags);
+	p_database->set_frame_category(frame_category);
+	p_database->set_frame_contacts(frame_contacts);
+
+	Ref<MMAnimationEntry> entry;
+	entry.instantiate();
+	entry->set_animation_name(p_result.name);
+	entry->set_library_name(p_result.library);
+	entry->set_category(p_result.category);
+	entry->set_tags(p_result.tags);
+	entry->set_length(p_result.length);
+	entry->set_loop(p_result.loop);
+	entry->set_frame_start(frame_start);
+	entry->set_frame_count(p_result.frame_count);
+	entry->set_speed_min(p_result.speed_min);
+	entry->set_speed_max(p_result.speed_max);
+
+	TypedArray<MMAnimationEntry> animations = p_database->get_animations();
+	animations.push_back(entry);
+	p_database->set_animations(animations);
+}
+
+Ref<MotionMatchingDatabase> MMFeatureExtractor::build_database(Skeleton3D *p_skeleton,
+		const Ref<AnimationLibrary> &p_library, const Dictionary &p_clip_settings) {
+	ERR_FAIL_NULL_V(p_skeleton, Ref<MotionMatchingDatabase>());
+	ERR_FAIL_COND_V(p_library.is_null(), Ref<MotionMatchingDatabase>());
+	if (!_prepare(p_skeleton)) {
+		return Ref<MotionMatchingDatabase>();
+	}
+	// Resolved once here instead of once per clip inside append_animation():
+	// it depends only on p_skeleton and the schema's pose bone list, neither
+	// of which changes for the rest of this call, so every worker thread
+	// below can safely read it without re-resolving or racing on it.
+	_resolve_pose_bones(p_skeleton);
+
+	Ref<MotionMatchingDatabase> database;
+	database.instantiate();
+	database->set_schema(_schema);
+	database->set_sample_rate(_sample_rate);
+
+	const PackedStringArray names = p_library->get_animation_list();
+	const int total = names.size();
+
+	// Every clip's Animation resource is resolved here, single threaded,
+	// since AnimationLibrary lookup by name is the one part of this setup
+	// that isn't obviously safe to call from several threads at once.
+	std::vector<Ref<Animation>> animations(total);
+	for (int i = 0; i < total; i++) {
+		animations[i] = p_library->get_animation(names[i]);
+	}
+
+	std::vector<ClipExtractionResult> results(total);
+	// uint8_t, not bool: std::vector<bool> is bit-packed, so two threads
+	// writing different logical indices could still race on the same
+	// underlying byte. Every element here gets its own byte instead.
+	std::vector<uint8_t> valid(total, 0);
+
+	// Work-stealing over a shared index rather than a fixed static split:
+	// clip lengths vary a lot, so a thread that happens to draw several long
+	// clips in a row would otherwise sit well past the others finishing.
+	std::atomic<int> next_index(0);
+	const int worker_count = total > 0
+			? CLAMP((int)std::thread::hardware_concurrency(), 1, MIN(total, 16))
+			: 0;
+
+	_progress_label = vformat("extracting (%d threads)", worker_count);
+
+	auto worker = [&]() {
+		int index;
+		while ((index = next_index.fetch_add(1)) < total) {
+			const Ref<Animation> &animation = animations[index];
+			if (animation.is_null()) {
+				continue;
+			}
+			const String &name = names[index];
+
+			int tags = 0;
+			int category = MM_CATEGORY_LOCOMOTION;
+
+			// p_clip_settings and _analyzer are only ever read from here,
+			// never written, for the whole extraction phase -- the same
+			// "immutable once built, read without a lock" reasoning
+			// MMSearchWorker already relies on for its search tree.
+			if (p_clip_settings.has(name)) {
+				const Dictionary settings = p_clip_settings[name];
+				tags = settings.get("tags", 0);
+				category = settings.has("category") ? (int)settings["category"]
+													: MMClipAnalyzer::category_for_tags(tags);
+			}
+
+			// Anything the caller did not classify gets classified from its
+			// motion. analyze_animation() uses a sampler local to its own
+			// call, so this is as safe to run concurrently as the
+			// extraction below.
+			if (tags == 0) {
+				const Dictionary stats = analyze_animation(p_skeleton, animation);
+				tags = _analyzer->classify_dictionary(stats, name);
+				category = MMClipAnalyzer::category_for_tags(tags);
+			}
+
+			valid[index] = _extract_clip(p_skeleton, animation, name, String(), category, tags,
+					results[index]);
+		}
+	};
+
+	if (worker_count <= 1) {
+		// Small library, or hardware_concurrency() couldn't tell -- run
+		// inline rather than pay thread startup cost for one worker.
+		worker();
+	} else {
+		std::vector<std::thread> workers;
+		workers.reserve(worker_count);
+		for (int i = 0; i < worker_count; i++) {
+			workers.emplace_back(worker);
+		}
+		for (std::thread &w : workers) {
+			w.join();
+		}
+	}
+
+	// The merge is single threaded and runs in original clip order, which is
+	// what keeps a rebuilt database byte-identical in layout to one built
+	// before this change -- only the (much more expensive) extraction above
+	// actually ran in parallel.
+	_progress_label = "merging";
+	for (int i = 0; i < total; i++) {
+		_progress = total > 0 ? (float)i / (float)total : 1.0f;
+		if (valid[i]) {
+			_commit_clip_result(database, results[i]);
+		}
+	}
+
+	_progress = 1.0f;
+	_progress_label = "done";
+
+	if (database->get_frame_count() > 0) {
+		database->finalize(_schema->get_dimension());
+	}
+	return database;
+}
+
+int MMFeatureExtractor::guess_tags_from_name(const String &p_name) {
+	// A scratch analyzer with motion analysis disabled: this makes the name
+	// rules (if any are configured on the default MMClipAnalyzer) the only
+	// source of tags. With no rules configured — the shipped default — this
+	// truthfully returns MM_TAG_IDLE rather than guessing at motion that was
+	// never measured. Real, motion-based tags come from analyze_library() /
+	// build_database() once a skeleton is available.
+	Ref<MMClipAnalyzer> analyzer;
+	analyzer.instantiate();
+	analyzer->set_use_name_rules(true);
+	analyzer->set_use_motion_analysis(false);
+
+	const MMClipStats empty_stats;
+	return analyzer->classify(empty_stats, p_name);
+}
+
+int MMFeatureExtractor::guess_category_from_tags(int p_tags) {
+	return MMClipAnalyzer::category_for_tags(p_tags);
+}
+
+void MMFeatureExtractor::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("set_schema", "schema"), &MMFeatureExtractor::set_schema);
+	ClassDB::bind_method(D_METHOD("get_schema"), &MMFeatureExtractor::get_schema);
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "schema", PROPERTY_HINT_RESOURCE_TYPE, "MMFeatureSchema"),
+			"set_schema", "get_schema");
+
+	ClassDB::bind_method(D_METHOD("set_profile", "profile"), &MMFeatureExtractor::set_profile);
+	ClassDB::bind_method(D_METHOD("get_profile"), &MMFeatureExtractor::get_profile);
+	ClassDB::bind_method(D_METHOD("get_last_prepare_report"), &MMFeatureExtractor::get_last_prepare_report);
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "profile", PROPERTY_HINT_RESOURCE_TYPE,
+						  "MMSkeletonProfile"),
+			"set_profile", "get_profile");
+
+	ClassDB::bind_method(D_METHOD("set_analyzer", "analyzer"), &MMFeatureExtractor::set_analyzer);
+	ClassDB::bind_method(D_METHOD("get_analyzer"), &MMFeatureExtractor::get_analyzer);
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "analyzer", PROPERTY_HINT_RESOURCE_TYPE,
+						  "MMClipAnalyzer"),
+			"set_analyzer", "get_analyzer");
+
+	MM_BIND_PROPERTY(MMFeatureExtractor, Variant::FLOAT, sample_rate)
+	MM_BIND_PROPERTY(MMFeatureExtractor, Variant::FLOAT, foot_contact_speed_ratio)
+	MM_BIND_PROPERTY(MMFeatureExtractor, Variant::FLOAT, foot_contact_height_ratio)
+	MM_BIND_PROPERTY(MMFeatureExtractor, Variant::BOOL, auto_detect_profile)
+	MM_BIND_PROPERTY(MMFeatureExtractor, Variant::BOOL, auto_configure_schema)
+	MM_BIND_PROPERTY(MMFeatureExtractor, Variant::FLOAT, root_yaw_offset_degrees)
+
+	ClassDB::bind_method(D_METHOD("analyze_animation", "skeleton", "animation"),
+			&MMFeatureExtractor::analyze_animation);
+	ClassDB::bind_method(D_METHOD("analyze_library", "skeleton", "library"),
+			&MMFeatureExtractor::analyze_library);
+	ClassDB::bind_method(D_METHOD("build_database", "skeleton", "library", "clip_settings"),
+			&MMFeatureExtractor::build_database);
+	ClassDB::bind_method(D_METHOD("append_animation", "database", "skeleton", "animation", "name",
+								 "library", "category", "tags"),
+			&MMFeatureExtractor::append_animation);
+	ClassDB::bind_method(D_METHOD("get_progress"), &MMFeatureExtractor::get_progress);
+	ClassDB::bind_method(D_METHOD("get_progress_label"), &MMFeatureExtractor::get_progress_label);
+	ClassDB::bind_method(D_METHOD("get_hip_height"), &MMFeatureExtractor::get_hip_height);
+
+	ClassDB::bind_static_method("MMFeatureExtractor", D_METHOD("guess_tags_from_name", "name"),
+			&MMFeatureExtractor::guess_tags_from_name);
+	ClassDB::bind_static_method("MMFeatureExtractor", D_METHOD("guess_category_from_tags", "tags"),
+			&MMFeatureExtractor::guess_category_from_tags);
+}
