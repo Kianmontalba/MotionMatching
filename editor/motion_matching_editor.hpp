@@ -95,51 +95,20 @@ private:
 	PopupMenu *_skeleton_popup = nullptr;
 	PackedStringArray _skeleton_candidates;
 
-	// BoneAttachment3D-style source switch. Off (the default) means "find the
-	// Skeleton3D in the open scene automatically" and the path box below is
-	// hidden entirely, because there is nothing left to type. On means "the
-	// skeleton is somewhere this dock cannot guess", which reveals the path
-	// box and the Pick... browser again.
-	//
-	// Persisted as the skeleton path itself rather than as a new flag: an
-	// empty path on the resource means internal, a filled one means external.
-	// That keeps old resources loading unchanged and needs no format bump.
-	CheckButton *_use_external_skeleton = nullptr;
-	PanelContainer *_skeleton_box = nullptr;
-	void _on_use_external_skeleton_toggled(bool p_pressed);
-
-	// Depth-first search for the first Skeleton3D under p_node. Only used in
-	// internal mode, where the whole point is that no path is typed.
-	Skeleton3D *_find_first_skeleton(Node *p_node) const;
-
-	// Re-resolves the skeleton without logging, then refills the bone
-	// dropdowns from it. Safe to call on every path/toggle change.
-	void _update_bone_pickers();
-
-	// Two optional manual overrides -- everything else always comes from
+	// Three optional manual overrides -- everything else always comes from
 	// auto-detect. Left empty (the common case), auto-detect decides these
 	// same as any other role. Filled in, MMSkeletonProfile locks just these
-	// two and keeps them through every future auto-detect pass, which is
-	// what makes them survive a rebuild instead of resetting.
-	// Dropdowns rather than free text. The list is read straight off the
-	// resolved Skeleton3D, so a rig whose names auto-detect cannot parse can
-	// still be pinned down by hand -- without anyone having to know or retype
-	// the exact bone string. Item 0 is always "(auto-detect)", which writes an
-	// empty override and hands the role back to MMSkeletonProfile.
-	OptionButton *_left_foot_override = nullptr;
-	OptionButton *_right_foot_override = nullptr;
-	void _on_left_foot_override_changed(int p_index);
-	void _on_right_foot_override_changed(int p_index);
-
-	// Fills both dropdowns from p_skeleton, or reduces them to the
-	// auto-detect entry alone when it is null. Whatever the resource already
-	// had selected is kept if that bone still exists on the new skeleton.
-	void _refresh_bone_pickers(Skeleton3D *p_skeleton);
-	void _select_bone_option(OptionButton *p_option, const String &p_name);
-	// Selected bone name, or empty for the auto-detect entry. Never use
-	// OptionButton::get_text() for this -- it returns the visible label, so
-	// auto-detect would be handed to the profile as a literal bone name.
-	String _selected_bone(OptionButton *p_option) const;
+	// three and keeps them through every future auto-detect pass, which is
+	// what makes them survive a rebuild instead of resetting -- and, since
+	// these three are the minimum the pipeline actually needs, setting all
+	// three by hand also lets Build proceed even when auto-detect's own
+	// heuristics fail on a particular rig's overall shape.
+	LineEdit *_pelvis_override = nullptr;
+	LineEdit *_left_foot_override = nullptr;
+	LineEdit *_right_foot_override = nullptr;
+	void _on_pelvis_override_changed(const String &p_text);
+	void _on_left_foot_override_changed(const String &p_text);
+	void _on_right_foot_override_changed(const String &p_text);
 	// The dock's anchor: whichever MotionMatchingResource the user is
 	// preparing. Everything else here reads from and writes back to this
 	// same resource (and, in turn, its own path on disk) instead of holding
@@ -229,14 +198,7 @@ private:
 	void _on_clip_edited();
 	void _populate_table();
 	void _log_line(const String &p_text, const Color &p_color = Color(1, 1, 1));
-	Skeleton3D *_resolve_skeleton(bool p_quiet = false);
-
-	// Godot forbids '/' inside an animation name within one AnimationLibrary,
-	// so a slash only ever appears when the names arrive already prefixed by
-	// their library (the "Walk/Walk_left" form an AnimationPlayer reports).
-	// Both helpers degrade cleanly to "no group" on an unprefixed name.
-	static String _group_of(const String &p_name);
-	static String _clip_of(const String &p_name);
+	Skeleton3D *_resolve_skeleton();
 
 protected:
 	static void _bind_methods();
