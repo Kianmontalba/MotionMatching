@@ -22,15 +22,20 @@ public:
 	// Suggests a category and tag mask per clip. The result is a plain
 	// dictionary so a tool script or the editor dock can edit it before it is
 	// handed to the extractor.
+	//
+	// Tags start at 0 (untagged) for every clip -- tagging is something the
+	// user does explicitly, one clip at a time, from the dock's Tags column.
+	// Category is still guessed from the clip's own name as a starting point
+	// (purely cosmetic in the table until Build time), independent of tags.
 	static Dictionary auto_tag_library(const Ref<AnimationLibrary> &p_library) {
 		Dictionary settings;
 		ERR_FAIL_COND_V_MSG(p_library.is_null(), settings, "auto_tag_library: library is null.");
 		const PackedStringArray names = p_library->get_animation_list();
 		for (int i = 0; i < names.size(); i++) {
-			const int tags = MMFeatureExtractor::guess_tags_from_name(names[i]);
+			const int name_guessed_tags = MMFeatureExtractor::guess_tags_from_name(names[i]);
 			Dictionary entry;
-			entry["tags"] = tags;
-			entry["category"] = MMFeatureExtractor::guess_category_from_tags(tags);
+			entry["tags"] = 0;
+			entry["category"] = MMFeatureExtractor::guess_category_from_tags(name_guessed_tags);
 			settings[names[i]] = entry;
 		}
 		return settings;
