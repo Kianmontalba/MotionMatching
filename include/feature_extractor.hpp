@@ -110,6 +110,12 @@ private:
 	float _progress = 0.0f;
 	float _hip_height = 1.0f;
 
+	// Set by _prepare() whenever it returns false, so a caller (the editor
+	// dock, in particular) can show the *specific* reason -- e.g. "Could not
+	// find enough limb chains" -- instead of only a generic "build failed"
+	// message. Cleared at the start of every _prepare() call.
+	String _last_prepare_report;
+
 	Vector<int> _pose_bone_indices;
 	Vector<int> _foot_slots; // Indices into the schema's pose bone list.
 
@@ -179,6 +185,7 @@ public:
 
 	void set_profile(const Ref<MMSkeletonProfile> &p_profile);
 	Ref<MMSkeletonProfile> get_profile() const { return _profile; }
+	String get_last_prepare_report() const { return _last_prepare_report; }
 
 	void set_analyzer(const Ref<MMClipAnalyzer> &p_analyzer);
 	Ref<MMClipAnalyzer> get_analyzer() const { return _analyzer; }
